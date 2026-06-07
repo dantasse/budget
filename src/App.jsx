@@ -115,7 +115,7 @@ export default function App() {
           if (tx.deleted) continue
           const subs = tx.subtransactions?.filter(s => !s.deleted) ?? []
           if (subs.length > 0)
-            newTxSubsById.set(tx.id, subs.map(s => ({ id: s.id, amount: s.amount, category_id: s.category_id })))
+            newTxSubsById.set(tx.id, subs.map(s => ({ id: s.id, amount: s.amount, category_id: s.category_id, memo: s.memo })))
         }
         txSubsById.current = newTxSubsById
         setRows(toRows(txData.data.transactions, catMap))
@@ -149,29 +149,30 @@ export default function App() {
     return { newGroup: '', newName: '' }
   }
 
-  function buildSplitBody(txId, changedSubIds, newCategoryId) {
+  function buildSplitBody(txId, changedSubIds, patch) {
     const allSubs = txSubsById.current.get(txId) ?? []
     const updated = allSubs.map(s =>
-      changedSubIds.has(s.id) ? { ...s, category_id: newCategoryId } : s
+      changedSubIds.has(s.id) ? { ...s, ...patch } : s
     )
     return { transaction: { subtransactions: updated } }
   }
 
-  function applySubsUpdate(txId, changedSubIds, newCategoryId) {
+  function applySubsUpdate(txId, changedSubIds, patch) {
     const allSubs = txSubsById.current.get(txId) ?? []
     txSubsById.current.set(txId, allSubs.map(s =>
-      changedSubIds.has(s.id) ? { ...s, category_id: newCategoryId } : s
+      changedSubIds.has(s.id) ? { ...s, ...patch } : s
     ))
   }
 
   const updateCategory = async (txId, subTxId, newCategoryId) => {
     const { newGroup, newName } = resolveCategory(newCategoryId)
+    const patch = { category_id: newCategoryId }
     const body = subTxId
-      ? buildSplitBody(txId, new Set([subTxId]), newCategoryId)
-      : { transaction: { category_id: newCategoryId } }
+      ? buildSplitBody(txId, new Set([subTxId]), patch)
+      : { transaction: patch }
     try {
       await apiFetch(`/budgets/${selectedBudgetId}/transactions/${txId}`, token, 'PATCH', body)
-      if (subTxId) applySubsUpdate(txId, new Set([subTxId]), newCategoryId)
+      if (subTxId) applySubsUpdate(txId, new Set([subTxId]), patch)
       setRows(prev => prev.map(row => {
         if (row._txId !== txId) return row
         if (subTxId !== null && row._subTxId !== subTxId) return row
@@ -203,13 +204,31 @@ export default function App() {
         }),
         ...[...splitByTx.entries()].map(([txId, subIds]) =>
           apiFetch(`/budgets/${selectedBudgetId}/transactions/${txId}`, token, 'PATCH',
-            buildSplitBody(txId, subIds, newCategoryId))
+            buildSplitBody(txId, subIds, { category_id: newCategoryId }))
         ),
       ].filter(Boolean))
-      for (const [txId, subIds] of splitByTx) applySubsUpdate(txId, subIds, newCategoryId)
+      for (const [txId, subIds] of splitByTx) applySubsUpdate(txId, subIds, { category_id: newCategoryId })
       setRows(prev => prev.map(row => {
         if (!keySet.has(`${row._txId}/${row._subTxId}`)) return row
         return { ...row, _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
+      }))
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  const updateMemo = async (txId, subTxId, newMemo) => {
+    const patch = { memo: newMemo }
+    const body = subTxId
+      ? buildSplitBody(txId, new Set([subTxId]), patch)
+      : { transaction: patch }
+    try {
+      await apiFetch(`/budgets/${selectedBudgetId}/transactions/${txId}`, token, 'PATCH', body)
+      if (subTxId) applySubsUpdate(txId, new Set([subTxId]), patch)
+      setRows(prev => prev.map(row => {
+        if (row._txId !== txId) return row
+        if (subTxId !== null && row._subTxId !== subTxId) return row
+        return { ...row, 'Memo': newMemo }
       }))
     } catch (e) {
       setError(e.message)
@@ -258,7 +277,7 @@ export default function App() {
         ))}
       </div>
 
-      {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} />}
+      {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} />}
       {activeTab === 'Categories'   && <CategoriesTab   rows={rows} selectedGroups={selectedGroups} onSelectedGroupsChange={setSelectedGroups} />}
       {activeTab === 'Reports'      && <ReportsTab      rows={rows} selectedGroups={selectedGroups} />}
     </div>
