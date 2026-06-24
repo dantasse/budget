@@ -5,6 +5,7 @@ import ReportsTab from './ReportsTab'
 
 const TABS = ['Transactions', 'Categories', 'Reports']
 const API  = 'https://api.ynab.com/v1'
+const MAIN = 'main'
 
 const TAB_STYLE = (active) => ({
   padding: '8px 20px',
@@ -60,20 +61,55 @@ function toRows(transactions, catMap) {
   return rows
 }
 
+function applyEdits(baseRows, edits) {
+  if (!edits || Object.keys(edits).length === 0) return baseRows
+  return baseRows.map(r => {
+    const edit = edits[`${r._txId}/${r._subTxId}`]
+    return edit ? { ...r, ...edit } : r
+  })
+}
+
+function scenarioEditsKey(budgetId, name) { return `ynab_scenario_${budgetId}_${name}` }
+function scenariosListKey(budgetId)       { return `ynab_scenarios_${budgetId}` }
+
+function loadScenarioEdits(budgetId, name) {
+  try { return JSON.parse(localStorage.getItem(scenarioEditsKey(budgetId, name))) ?? {} }
+  catch { return {} }
+}
+
+function saveScenarioEdits(budgetId, name, edits) {
+  localStorage.setItem(scenarioEditsKey(budgetId, name), JSON.stringify(edits))
+}
+
+function loadScenariosList(budgetId) {
+  try { return JSON.parse(localStorage.getItem(scenariosListKey(budgetId))) ?? [MAIN] }
+  catch { return [MAIN] }
+}
+
+function saveScenariosList(budgetId, list) {
+  localStorage.setItem(scenariosListKey(budgetId), JSON.stringify(list))
+}
+
 export default function App() {
   const [token,            setToken]            = useState(() => localStorage.getItem('ynab_token') ?? '')
   const [tokenInput,       setTokenInput]       = useState(() => localStorage.getItem('ynab_token') ?? '')
   const [budgets,          setBudgets]          = useState([])
   const [selectedBudgetId, setSelectedBudgetId] = useState(() => localStorage.getItem('ynab_budget_id') ?? '')
   const [categoryGroups,   setCategoryGroups]   = useState([])
-  const [rows,             setRows]             = useState([])
-  // txSubsById: Map<txId, Array<{id, amount, category_id}>> — full subtransaction list per split tx,
+  const [baseRows,         setBaseRows]         = useState([])
+  const [scenarios,        setScenarios]        = useState([MAIN])
+  const [activeScenario,   setActiveScenario]   = useState(MAIN)
+  const [scenarioEdits,    setScenarioEdits]    = useState({})
+  const [newScenarioInput, setNewScenarioInput] = useState(null) // null = hidden, string = visible
+  // txSubsById: Map<txId, Array<{id, amount, category_id, memo}>> — full subtransaction list per split tx,
   // needed to reconstruct the complete array when patching a single subtransaction's category.
   const txSubsById = useRef(new Map())
   const [loading,          setLoading]          = useState(false)
   const [error,            setError]            = useState(null)
   const [activeTab,        setActiveTab]        = useState('Transactions')
   const [selectedGroups,   setSelectedGroups]   = useState(null)
+
+  const rows = applyEdits(baseRows, scenarioEdits)
 
   useEffect(() => {
     if (!token) return
@@ -89,6 +125,10 @@ export default function App() {
     if (!token || !selectedBudgetId) return
     setLoading(true)
     setError(null)
+    const loadedScenarios = loadScenariosList(selectedBudgetId)
+    setScenarios(loadedScenarios)
+    setActiveScenario(MAIN)
+    setScenarioEdits({})
     Promise.all([
       apiFetch(`/budgets/${selectedBudgetId}/transactions`, token),
       apiFetch(`/budgets/${selectedBudgetId}/categories`, token),
@@ -118,7 +158,7 @@ export default function App() {
             newTxSubsById.set(tx.id, subs.map(s => ({ id: s.id, amount: s.amount, category_id: s.category_id, memo: s.memo })))
         }
         txSubsById.current = newTxSubsById
-        setRows(toRows(txData.data.transactions, catMap))
+        setBaseRows(toRows(txData.data.transactions, catMap))
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
@@ -130,7 +170,7 @@ export default function App() {
     if (!t) return
     localStorage.setItem('ynab_token', t)
     setToken(t)
-    setRows([])
+    setBaseRows([])
     setBudgets([])
   }
 
@@ -138,7 +178,29 @@ export default function App() {
     const id = e.target.value
     localStorage.setItem('ynab_budget_id', id)
     setSelectedBudgetId(id)
-    setRows([])
+    setBaseRows([])
+  }
+
+  const handleScenarioChange = (e) => {
+    const name = e.target.value
+    if (name === '__new__') {
+      setNewScenarioInput('')
+      return
+    }
+    setActiveScenario(name)
+    setScenarioEdits(selectedBudgetId ? loadScenarioEdits(selectedBudgetId, name) : {})
+  }
+
+  const handleCreateScenario = (e) => {
+    e.preventDefault()
+    const name = newScenarioInput.trim()
+    if (!name || scenarios.includes(name)) return
+    const next = [...scenarios, name]
+    setScenarios(next)
+    saveScenariosList(selectedBudgetId, next)
+    setActiveScenario(name)
+    setScenarioEdits({})
+    setNewScenarioInput(null)
   }
 
   function resolveCategory(newCategoryId) {
@@ -164,19 +226,35 @@ export default function App() {
     ))
   }
 
+  function updateEdits(updater) {
+    setScenarioEdits(prev => {
+      const next = updater(prev)
+      saveScenarioEdits(selectedBudgetId, activeScenario, next)
+      return next
+    })
+  }
+
   const updateCategory = async (txId, subTxId, newCategoryId) => {
     const { newGroup, newName } = resolveCategory(newCategoryId)
-    const patch = { category_id: newCategoryId }
+    const rowPatch = { _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
+    const key = `${txId}/${subTxId}`
+
+    if (activeScenario !== MAIN) {
+      updateEdits(prev => ({ ...prev, [key]: { ...prev[key], ...rowPatch } }))
+      return
+    }
+
+    const apiPatch = { category_id: newCategoryId }
     const body = subTxId
-      ? buildSplitBody(txId, new Set([subTxId]), patch)
-      : { transaction: patch }
+      ? buildSplitBody(txId, new Set([subTxId]), apiPatch)
+      : { transaction: apiPatch }
     try {
       await apiFetch(`/budgets/${selectedBudgetId}/transactions/${txId}`, token, 'PATCH', body)
-      if (subTxId) applySubsUpdate(txId, new Set([subTxId]), patch)
-      setRows(prev => prev.map(row => {
+      if (subTxId) applySubsUpdate(txId, new Set([subTxId]), apiPatch)
+      setBaseRows(prev => prev.map(row => {
         if (row._txId !== txId) return row
         if (subTxId !== null && row._subTxId !== subTxId) return row
-        return { ...row, _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
+        return { ...row, ...rowPatch }
       }))
     } catch (e) {
       setError(e.message)
@@ -186,9 +264,20 @@ export default function App() {
   const bulkUpdateCategory = async (rowKeys, newCategoryId) => {
     const { newGroup, newName } = resolveCategory(newCategoryId)
     const keySet = new Set(rowKeys)
-    const selected = rows.filter(r => keySet.has(`${r._txId}/${r._subTxId}`))
-    const nonSplit = selected.filter(r => r._subTxId === null)
-    const split    = selected.filter(r => r._subTxId !== null)
+    const rowPatch = { _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
+
+    if (activeScenario !== MAIN) {
+      updateEdits(prev => {
+        const next = { ...prev }
+        for (const k of keySet) next[k] = { ...prev[k], ...rowPatch }
+        return next
+      })
+      return
+    }
+
+    const selected = baseRows.filter(r => keySet.has(`${r._txId}/${r._subTxId}`))
+    const nonSplit  = selected.filter(r => r._subTxId === null)
+    const split     = selected.filter(r => r._subTxId !== null)
 
     // Group split rows by txId so we send one PATCH per parent transaction
     const splitByTx = new Map()
@@ -197,20 +286,21 @@ export default function App() {
       splitByTx.get(r._txId).add(r._subTxId)
     }
 
+    const apiPatch = { category_id: newCategoryId }
     try {
       await Promise.all([
         nonSplit.length > 0 && apiFetch(`/budgets/${selectedBudgetId}/transactions`, token, 'PATCH', {
-          transactions: nonSplit.map(r => ({ id: r._txId, category_id: newCategoryId })),
+          transactions: nonSplit.map(r => ({ id: r._txId, ...apiPatch })),
         }),
         ...[...splitByTx.entries()].map(([txId, subIds]) =>
           apiFetch(`/budgets/${selectedBudgetId}/transactions/${txId}`, token, 'PATCH',
-            buildSplitBody(txId, subIds, { category_id: newCategoryId }))
+            buildSplitBody(txId, subIds, apiPatch))
         ),
       ].filter(Boolean))
-      for (const [txId, subIds] of splitByTx) applySubsUpdate(txId, subIds, { category_id: newCategoryId })
-      setRows(prev => prev.map(row => {
+      for (const [txId, subIds] of splitByTx) applySubsUpdate(txId, subIds, apiPatch)
+      setBaseRows(prev => prev.map(row => {
         if (!keySet.has(`${row._txId}/${row._subTxId}`)) return row
-        return { ...row, _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
+        return { ...row, ...rowPatch }
       }))
     } catch (e) {
       setError(e.message)
@@ -218,17 +308,25 @@ export default function App() {
   }
 
   const updateMemo = async (txId, subTxId, newMemo) => {
-    const patch = { memo: newMemo }
+    const rowPatch = { 'Memo': newMemo }
+    const key = `${txId}/${subTxId}`
+
+    if (activeScenario !== MAIN) {
+      updateEdits(prev => ({ ...prev, [key]: { ...prev[key], ...rowPatch } }))
+      return
+    }
+
+    const apiPatch = { memo: newMemo }
     const body = subTxId
-      ? buildSplitBody(txId, new Set([subTxId]), patch)
-      : { transaction: patch }
+      ? buildSplitBody(txId, new Set([subTxId]), apiPatch)
+      : { transaction: apiPatch }
     try {
       await apiFetch(`/budgets/${selectedBudgetId}/transactions/${txId}`, token, 'PATCH', body)
-      if (subTxId) applySubsUpdate(txId, new Set([subTxId]), patch)
-      setRows(prev => prev.map(row => {
+      if (subTxId) applySubsUpdate(txId, new Set([subTxId]), apiPatch)
+      setBaseRows(prev => prev.map(row => {
         if (row._txId !== txId) return row
         if (subTxId !== null && row._subTxId !== subTxId) return row
-        return { ...row, 'Memo': newMemo }
+        return { ...row, ...rowPatch }
       }))
     } catch (e) {
       setError(e.message)
@@ -236,21 +334,21 @@ export default function App() {
   }
 
   return (
-    <div style={{ fontFamily: 'sans-serif', padding: '24px' }}>
-      <h1 style={{ marginBottom: '16px' }}>Budget Thing</h1>
-
-      <form onSubmit={handleConnect} style={{ marginBottom: '16px', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-        <label style={{ fontSize: '14px' }}>
-          Personal Access Token:
-          <input
-            type="password"
-            value={tokenInput}
-            onChange={e => setTokenInput(e.target.value)}
-            placeholder="ynab_..."
-            style={{ marginLeft: '8px', padding: '4px 8px', fontSize: '14px', width: '320px' }}
-          />
-        </label>
-        <button type="submit" style={{ padding: '4px 12px', fontSize: '14px' }}>Connect</button>
+    <div style={{ fontFamily: 'sans-serif', padding: '24px', display: 'flex', flexDirection: 'column', height: '100vh', boxSizing: 'border-box', overflow: 'hidden' }}>
+      <div style={{ marginBottom: '16px', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <form onSubmit={handleConnect} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <label style={{ fontSize: '14px' }}>
+            Personal Access Token:
+            <input
+              type="password"
+              value={tokenInput}
+              onChange={e => setTokenInput(e.target.value)}
+              placeholder="ynab_..."
+              style={{ marginLeft: '8px', padding: '4px 8px', fontSize: '14px', width: '320px' }}
+            />
+          </label>
+          <button type="submit" style={{ padding: '4px 12px', fontSize: '14px' }}>Connect</button>
+        </form>
 
         {budgets.length > 0 && (
           <select
@@ -264,7 +362,31 @@ export default function App() {
             ))}
           </select>
         )}
-      </form>
+
+        {selectedBudgetId && (
+          newScenarioInput !== null
+            ? <form onSubmit={handleCreateScenario} style={{ display: 'flex', gap: '4px' }}>
+                <input
+                  autoFocus
+                  value={newScenarioInput}
+                  onChange={e => setNewScenarioInput(e.target.value)}
+                  placeholder="Scenario name"
+                  onKeyDown={e => { if (e.key === 'Escape') setNewScenarioInput(null) }}
+                  style={{ padding: '4px 8px', fontSize: '14px', width: '160px' }}
+                />
+                <button type="submit" style={{ padding: '4px 10px', fontSize: '14px' }}>Create</button>
+                <button type="button" onClick={() => setNewScenarioInput(null)} style={{ padding: '4px 10px', fontSize: '14px' }}>Cancel</button>
+              </form>
+            : <select
+                value={activeScenario}
+                onChange={handleScenarioChange}
+                style={{ padding: '4px 8px', fontSize: '14px' }}
+              >
+                {scenarios.map(s => <option key={s} value={s}>{s}</option>)}
+                <option value="__new__">＋ New scenario…</option>
+              </select>
+        )}
+      </div>
 
       {loading && <p style={{ color: '#555' }}>Loading…</p>}
       {error   && <p style={{ color: 'red'  }}>{error}</p>}
@@ -277,9 +399,11 @@ export default function App() {
         ))}
       </div>
 
-      {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} />}
-      {activeTab === 'Categories'   && <CategoriesTab   rows={rows} selectedGroups={selectedGroups} onSelectedGroupsChange={setSelectedGroups} />}
-      {activeTab === 'Reports'      && <ReportsTab      rows={rows} selectedGroups={selectedGroups} />}
+      <div style={{ flex: 1, minHeight: 0 }}>
+        {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
+        {activeTab === 'Categories'   && <CategoriesTab   rows={rows} selectedGroups={selectedGroups} onSelectedGroupsChange={setSelectedGroups} />}
+        {activeTab === 'Reports'      && <ReportsTab      rows={rows} selectedGroups={selectedGroups} />}
+      </div>
     </div>
   )
 }

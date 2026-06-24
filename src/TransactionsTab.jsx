@@ -247,7 +247,7 @@ function ResizableHeader({ colKey, width, onResize, onSort, sortDir, children })
   )
 }
 
-export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo }) {
+export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario }) {
   const [hideInflow,       setHideInflow]       = useState(true)
   const [colWidths,        setColWidths]        = useState(DEFAULT_WIDTHS)
   const [sort,             setSort]             = useState({ key: 'Date', dir: 'desc' })
@@ -403,7 +403,12 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
   const totalWidth = CHECKBOX_WIDTH + COLUMNS.reduce((sum, { key }) => sum + colWidths[key], 0)
 
   return (
-    <>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {isMainScenario && (
+        <div style={{ marginBottom: '8px', padding: '6px 12px', background: '#fff3e0', border: '1px solid #f5a623', borderRadius: '4px', fontSize: '13px', color: '#7a4f00' }}>
+          ⚠ You are editing real data
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '8px', flexWrap: 'wrap' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
           <input
@@ -437,7 +442,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
 
       <div
         ref={scrollRef}
-        style={{ overflowX: 'auto', overflowY: 'auto', height: 'calc(100vh - 280px)', contain: 'strict' }}
+        style={{ overflowX: 'auto', overflowY: 'auto', flex: 1, minHeight: 0, contain: 'strict', background: isMainScenario ? '#fff8f0' : undefined }}
       >
         <table style={{ borderCollapse: 'collapse', fontSize: '13px', tableLayout: 'fixed', width: totalWidth }}>
           <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
@@ -525,6 +530,6 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
           </tbody>
         </table>
       </div>
-    </>
+    </div>
   )
 }
