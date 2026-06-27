@@ -127,8 +127,9 @@ export default function App() {
     setError(null)
     const loadedScenarios = loadScenariosList(selectedBudgetId)
     setScenarios(loadedScenarios)
-    setActiveScenario(MAIN)
-    setScenarioEdits({})
+    const defaultScenario = loadedScenarios.find(s => s !== MAIN) ?? MAIN
+    setActiveScenario(defaultScenario)
+    setScenarioEdits(defaultScenario !== MAIN ? loadScenarioEdits(selectedBudgetId, defaultScenario) : {})
     Promise.all([
       apiFetch(`/budgets/${selectedBudgetId}/transactions`, token),
       apiFetch(`/budgets/${selectedBudgetId}/categories`, token),
@@ -388,6 +389,11 @@ export default function App() {
         )}
       </div>
 
+      {activeScenario === MAIN && selectedBudgetId && (
+        <div style={{ marginBottom: '8px', padding: '6px 12px', background: '#fff3e0', border: '1px solid #f5a623', borderRadius: '4px', fontSize: '13px', color: '#7a4f00' }}>
+          ⚠ You are editing real data
+        </div>
+      )}
       {loading && <p style={{ color: '#555' }}>Loading…</p>}
       {error   && <p style={{ color: 'red'  }}>{error}</p>}
 
@@ -399,10 +405,10 @@ export default function App() {
         ))}
       </div>
 
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
         {activeTab === 'Categories'   && <CategoriesTab   rows={rows} selectedGroups={selectedGroups} onSelectedGroupsChange={setSelectedGroups} />}
-        {activeTab === 'Reports'      && <ReportsTab      rows={rows} selectedGroups={selectedGroups} />}
+        {activeTab === 'Reports'      && <ReportsTab      rows={rows} selectedGroups={selectedGroups} budgetId={selectedBudgetId} />}
       </div>
     </div>
   )
