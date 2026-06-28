@@ -129,7 +129,7 @@ export default function App() {
     setScenarios(loadedScenarios)
     const defaultScenario = loadedScenarios.find(s => s !== MAIN) ?? MAIN
     setActiveScenario(defaultScenario)
-    setScenarioEdits(defaultScenario !== MAIN ? loadScenarioEdits(selectedBudgetId, defaultScenario) : {})
+    setScenarioEdits(loadScenarioEdits(selectedBudgetId, defaultScenario))
     Promise.all([
       apiFetch(`/budgets/${selectedBudgetId}/transactions`, token),
       apiFetch(`/budgets/${selectedBudgetId}/categories`, token),
@@ -231,6 +231,20 @@ export default function App() {
     setScenarioEdits(prev => {
       const next = updater(prev)
       saveScenarioEdits(selectedBudgetId, activeScenario, next)
+      return next
+    })
+  }
+
+  const renameGroup = (originalName, newName) => {
+    const trimmed = newName.trim()
+    if (!trimmed || trimmed === originalName) return
+    updateEdits(prev => {
+      const next = { ...prev }
+      for (const row of rows) {
+        if ((row['Category Group'] ?? '') !== originalName) continue
+        const key = `${row._txId}/${row._subTxId}`
+        next[key] = { ...(prev[key] ?? {}), 'Category Group': trimmed }
+      }
       return next
     })
   }
@@ -408,7 +422,7 @@ export default function App() {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
         {activeTab === 'Categories'   && <CategoriesTab   rows={rows} selectedGroups={selectedGroups} onSelectedGroupsChange={setSelectedGroups} />}
-        {activeTab === 'Reports'      && <ReportsTab      rows={rows} selectedGroups={selectedGroups} budgetId={selectedBudgetId} />}
+        {activeTab === 'Reports'      && <ReportsTab      rows={rows} selectedGroups={selectedGroups} budgetId={selectedBudgetId} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} />}
       </div>
     </div>
   )

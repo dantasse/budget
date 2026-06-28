@@ -247,8 +247,9 @@ function ResizableHeader({ colKey, width, onResize, onSort, sortDir, children })
   )
 }
 
-export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario }) {
+export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, hiddenCols = [] }) {
   const [hideInflow,       setHideInflow]       = useState(true)
+  const [search,           setSearch]           = useState('')
   const [colWidths,        setColWidths]        = useState(DEFAULT_WIDTHS)
   const [sort,             setSort]             = useState({ key: 'Date', dir: 'desc' })
   const [updatingIds,      setUpdatingIds]      = useState(new Set())
@@ -256,6 +257,8 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
   const [bulkBusy,         setBulkBusy]         = useState(false)
   const [focusedRowIndex,  setFocusedRowIndex]  = useState(-1)
   const [editingMemo,      setEditingMemo]      = useState(null) // { key, txId, subTxId, value }
+
+  const visibleCols = COLUMNS.filter(c => !hiddenCols.includes(c.key))
 
   const scrollRef        = useRef(null)
   const comboboxInputRef = useRef(null)
@@ -286,9 +289,10 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
     setSelectedIds(new Set())
   }
 
-  const filteredRows = hideInflow
-    ? rows.filter(r => parseMoney(r['Inflow']) === 0)
-    : rows
+  const searchLower = search.toLowerCase()
+  const filteredRows = rows
+    .filter(r => !hideInflow || parseMoney(r['Inflow']) === 0)
+    .filter(r => !searchLower || COLUMNS.some(({ key }) => String(r[key] ?? '').toLowerCase().includes(searchLower)))
 
   const visibleRows = sort.key
     ? [...filteredRows].sort((a, b) => {
@@ -400,7 +404,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
     setFocusedRowIndex(index)
   }
 
-  const totalWidth = CHECKBOX_WIDTH + COLUMNS.reduce((sum, { key }) => sum + colWidths[key], 0)
+  const totalWidth = CHECKBOX_WIDTH + visibleCols.reduce((sum, { key }) => sum + colWidths[key], 0)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -418,6 +422,13 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
           />
           Hide inflow rows
         </label>
+        <input
+          type="search"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search…"
+          style={{ padding: '3px 8px', fontSize: '13px', border: '1px solid #ccc', borderRadius: '4px', width: '180px' }}
+        />
         <span style={{ color: '#aaa' }}>|</span>
         {selectedIds.size > 0 && (
           <span style={{ color: '#2c3e50', fontWeight: 600, fontSize: '13px' }}>{selectedIds.size} selected</span>
@@ -450,7 +461,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
               <th style={{ width: CHECKBOX_WIDTH, minWidth: CHECKBOX_WIDTH, maxWidth: CHECKBOX_WIDTH, border: '1px solid #444', textAlign: 'center', padding: 0 }}>
                 <input type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAll} />
               </th>
-              {COLUMNS.map(({ key }) => (
+              {visibleCols.map(({ key }) => (
                 <ResizableHeader
                   key={key} colKey={key} width={colWidths[key]}
                   onResize={handleResize} onSort={handleSort}
@@ -463,7 +474,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
           </thead>
           <tbody>
             {paddingTop > 0 && (
-              <tr><td colSpan={COLUMNS.length + 1} style={{ height: paddingTop, padding: 0, border: 'none' }} /></tr>
+              <tr><td colSpan={visibleCols.length + 1} style={{ height: paddingTop, padding: 0, border: 'none' }} /></tr>
             )}
             {virtualItems.map(virtualRow => {
               const row     = visibleRows[virtualRow.index]
@@ -483,7 +494,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
                   <td style={CHECK_TD_STYLE} onClick={e => e.stopPropagation()}>
                     <input type="checkbox" checked={isSelected} onChange={() => toggleRow(row)} />
                   </td>
-                  {COLUMNS.map(({ key }) => {
+                  {visibleCols.map(({ key }) => {
                     const isEditableMemo = key === 'Memo' && editingMemo?.key === rowKey(row)
                     return (
                       <td
@@ -525,7 +536,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
               )
             })}
             {paddingBottom > 0 && (
-              <tr><td colSpan={COLUMNS.length + 1} style={{ height: paddingBottom, padding: 0, border: 'none' }} /></tr>
+              <tr><td colSpan={visibleCols.length + 1} style={{ height: paddingBottom, padding: 0, border: 'none' }} /></tr>
             )}
           </tbody>
         </table>
