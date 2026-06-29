@@ -92,9 +92,10 @@ function classifyAll(rows, assignments, manualKeys, numParts) {
 }
 
 export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup }) {
-  const hiddenKey = `ynab_report_hidden_${budgetId}`
-  const mergesKey = `ynab_report_merges_${budgetId}`
-  const splitsKey = `ynab_report_splits_${budgetId}`
+  const hiddenKey        = `ynab_report_hidden_${budgetId}`
+  const mergesKey        = `ynab_report_merges_${budgetId}`
+  const splitsKey        = `ynab_report_splits_${budgetId}`
+  const groupOverridesKey = `ynab_report_groupoverrides_${budgetId}`
 
   const [hiddenNames, setHiddenNames] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem(hiddenKey)) ?? []) }
@@ -111,8 +112,13 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     try { return new Map(JSON.parse(localStorage.getItem(splitsKey)) ?? []) }
     catch { return new Map() }
   })
-  // mergeOrder: insertion order for Cmd+Z (not persisted)
-  const [mergeOrder,       setMergeOrder]       = useState([])
+  // groupOverrides: Map<catName, groupName> — display-level group reassignment
+  const [groupOverrides, setGroupOverrides] = useState(() => {
+    try { return new Map(JSON.parse(localStorage.getItem(groupOverridesKey)) ?? []) }
+    catch { return new Map() }
+  })
+  // undoStack: [{type:'merge',child}|{type:'groupMove',cat,prevGroup}] — not persisted
+  const [undoStack,        setUndoStack]        = useState([])
   const [dragging,         setDragging]         = useState(null)
   const [dropTarget,       setDropTarget]       = useState(null)
   const [selectedCategory, setSelectedCategory] = useState(null)
@@ -121,6 +127,8 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
   // editingSplit: { catName, parts: string[], assignments: {[txKey]: number}, manualKeys: Set<string> } | null
   const [editingSplit,     setEditingSplit]     = useState(null)
   const [groupPositions,   setGroupPositions]   = useState({})
+  const [dragLabel,        setDragLabel]        = useState(null) // { text, x, y, width, height } | null
+  const [catSearch,        setCatSearch]        = useState('')
   const svgWrapperRef = useRef(null)
 
   useEffect(() => {
@@ -134,6 +142,10 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
   useEffect(() => {
     localStorage.setItem(splitsKey, JSON.stringify([...splits]))
   }, [splits, splitsKey])
+
+  useEffect(() => {
+    localStorage.setItem(groupOverridesKey, JSON.stringify([...groupOverrides]))
+  }, [groupOverrides, groupOverridesKey])
 
   useEffect(() => {
     const el = svgWrapperRef.current
@@ -176,18 +188,28 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
 
   const handleMerge = useCallback((fromName, toName) => {
     setMerges(prev => new Map(prev).set(fromName, toName))
-    setMergeOrder(prev => [...prev.filter(n => n !== fromName), fromName])
+    setUndoStack(prev => [...prev.filter(e => !(e.type === 'merge' && e.child === fromName)), { type: 'merge', child: fromName }])
   }, [])
 
   const applyUngroup = useCallback((childName) => {
     setMerges(prev => { const next = new Map(prev); next.delete(childName); return next })
-    setMergeOrder(prev => prev.filter(n => n !== childName))
+    setUndoStack(prev => prev.filter(e => !(e.type === 'merge' && e.child === childName)))
   }, [])
 
   const handleUndo = useCallback(() => {
-    if (mergeOrder.length === 0) return
-    applyUngroup(mergeOrder[mergeOrder.length - 1])
-  }, [mergeOrder, applyUngroup])
+    const last = undoStack[undoStack.length - 1]
+    if (!last) return
+    if (last.type === 'merge') {
+      applyUngroup(last.child)
+    } else {
+      setGroupOverrides(prev => {
+        const next = new Map(prev)
+        last.prevGroup === undefined ? next.delete(last.cat) : next.set(last.cat, last.prevGroup)
+        return next
+      })
+      setUndoStack(prev => prev.slice(0, -1))
+    }
+  }, [undoStack, applyUngroup])
 
   useEffect(() => {
     const handler = (e) => {
@@ -254,9 +276,10 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
       if (!isRowSelected(row, selectedGroups)) continue
       const outflow = parseMoney(row['Outflow'])
       if (outflow === 0) continue
-      const group = row['Category Group'] || '(none)'
-      const cat   = row['Category'] || group
+      const baseGroup = row['Category Group'] || '(none)'
+      const cat       = row['Category'] || baseGroup
       if (hiddenNames.has(cat)) continue
+      const group    = groupOverrides.get(cat) ?? baseGroup
       const splitDef = splits.get(cat)
       let effectiveCat = cat
       if (splitDef?.parts?.length >= 2) {
@@ -278,6 +301,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
             value: Math.round(value * 100) / 100,
             groupColorIndex: gi,
             _splitFrom: splitOrigins.get(cName),
+            _groupName: gName,
           }))
           .sort((a, b) => b.value - a.value),
       }))
@@ -287,7 +311,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
         const bSum = b.children.reduce((s, c) => s + c.value, 0)
         return bSum - aSum
       })
-  }, [rows, selectedGroups, hiddenNames, splits])
+  }, [rows, selectedGroups, hiddenNames, splits, groupOverrides])
 
   const filteredRows = useMemo(() => {
     if (!selectedCategory) return []
@@ -354,7 +378,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     setEditingSplit(null)
   }
 
-  const renderCell = ({ x, y, width, height, depth, name, value, groupColorIndex, _splitFrom }) => {
+  const renderCell = ({ x, y, width, height, depth, name, value, groupColorIndex, _splitFrom, _groupName }) => {
     if (depth === 0 || !width || !height || width < 2 || height < 2) return null
     const color = COLORS[groupColorIndex % COLORS.length]
 
@@ -367,21 +391,36 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     }
 
     // depth === 2: category cell
+    // dropTarget === name        → merge mode (hovering over text label)
+    // dropTarget === `grp:${name}` → group-move mode (hovering over background)
     const isDraggingThis = dragging === name
-    const isTarget       = dropTarget === name && dragging && dragging !== name
+    // true when the dragged category already lives in this cell's group — group-move would be a no-op
+    const sameGroup      = dragging && dragging !== name && twoLevelData.find(g => g.children.some(c => c.name === dragging))?.name === _groupName
+    const isMergeTarget  = dropTarget === name           && dragging && dragging !== name
+    const isGroupTarget  = dropTarget === `grp:${name}`  && dragging && dragging !== name && !sameGroup
     const showText       = width > 50  && height > 24
     const showValue      = width > 70  && height > 44
+    const textY          = y + height/2 + (showValue ? -7 : 4)
     return (
       <g
         style={{ cursor: dragging ? (isDraggingThis ? 'grabbing' : 'copy') : 'pointer', userSelect: 'none' }}
         onMouseDown={e => { e.preventDefault(); setDragging(name) }}
-        onMouseEnter={() => { if (dragging && dragging !== name) setDropTarget(name) }}
-        onMouseLeave={() => { if (dropTarget === name) setDropTarget(null) }}
+        onMouseLeave={() => {
+          if (dropTarget === name || dropTarget === `grp:${name}`) setDropTarget(null)
+          setDragLabel(null)
+        }}
         onMouseUp={() => {
           if (dragging && dragging !== name) {
-            handleMerge(dragging, name)
+            if (dropTarget === name || sameGroup) {
+              handleMerge(dragging, name)
+            } else {
+              const prevGroup = groupOverrides.get(dragging)
+              setUndoStack(prev => [...prev, { type: 'groupMove', cat: dragging, prevGroup }])
+              setGroupOverrides(prev => new Map(prev).set(dragging, _groupName))
+            }
             setDragging(null)
             setDropTarget(null)
+            setDragLabel(null)
           } else if (dragging === name) {
             if (_splitFrom) {
               openSplitEditor(_splitFrom)
@@ -398,12 +437,56 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
           setEditingGroup(null)
         }}
       >
-        <rect x={x} y={y} width={width} height={height} fill={color} stroke="#fff" strokeWidth={isTarget ? 3 : 1} opacity={isDraggingThis ? 0.35 : 0.85} />
-        {isTarget && <rect x={x+2} y={y+2} width={width-4} height={height-4} fill="none" stroke="#fff" strokeWidth={2} strokeDasharray="5 3" />}
+        {/* background rect: drop here = move to this group */}
+        <rect
+          x={x} y={y} width={width} height={height}
+          fill={color} stroke="#fff"
+          strokeWidth={isMergeTarget || isGroupTarget ? 3 : 1}
+          opacity={isDraggingThis ? 0.35 : 0.85}
+          onMouseEnter={() => {
+            if (dragging && dragging !== name) {
+              if (sameGroup) {
+                setDropTarget(name)
+                setDragLabel({ text: `Merge with ${name}`, x, y, width, height })
+              } else {
+                setDropTarget(`grp:${name}`)
+                const gPos = groupPositions[_groupName] ?? { x, y, width, height }
+                setDragLabel({ text: `Move ${dragging} to ${_groupName}`, ...gPos })
+              }
+            }
+          }}
+        />
+        {isMergeTarget && (
+          <rect x={x+2} y={y+2} width={width-4} height={height-4} fill="none" stroke="#fff" strokeWidth={2} strokeDasharray="5 3" />
+        )}
+        {catSearch && !name.toLowerCase().includes(catSearch.toLowerCase()) && (
+          <rect x={x} y={y} width={width} height={height} fill="#fff" opacity={0.60} style={{ pointerEvents: 'none' }} />
+        )}
         {showText && !isDraggingThis && (
-          <text x={x + width/2} y={y + height/2 + (showValue ? -7 : 4)} textAnchor="middle" fill="#fff" fontSize={12} fontWeight={600} style={{ pointerEvents: 'none' }}>
-            {name}
-          </text>
+          <>
+            <text x={x + width/2} y={textY} textAnchor="middle" fill="#fff" fontSize={12} fontWeight={600} style={{ pointerEvents: 'none' }}>
+              {name}
+            </text>
+            {/* invisible hit-zone over text label: drop here = merge (only when cross-group) */}
+            <rect
+              x={x + width * 0.1} y={textY - 11} width={width * 0.8} height={16}
+              fill="transparent"
+              style={{ pointerEvents: dragging && dragging !== name && !sameGroup ? 'auto' : 'none' }}
+              onMouseEnter={() => {
+                if (dragging && dragging !== name) {
+                  setDropTarget(name)
+                  setDragLabel({ text: `Merge with ${name}`, x, y, width, height })
+                }
+              }}
+              onMouseLeave={() => {
+                if (dropTarget === name && dragging && !sameGroup) {
+                  setDropTarget(`grp:${name}`)
+                  const gPos = groupPositions[_groupName] ?? { x, y, width, height }
+                  setDragLabel({ text: `Move ${dragging} to ${_groupName}`, ...gPos })
+                }
+              }}
+            />
+          </>
         )}
         {showValue && !isDraggingThis && (
           <text x={x + width/2} y={y + height/2 + 10} textAnchor="middle" fill="#fff" fontSize={11} opacity={0.85} style={{ pointerEvents: 'none' }}>
@@ -432,14 +515,24 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     <div>
       <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '16px', fontSize: '14px', color: '#555' }}>
         <span>Total spending: <strong style={{ color: '#2c3e50' }}>{dollarFormatter(total)}</strong>{' '}across <strong>{visibleCount}</strong> categories</span>
-        {mergeOrder.length > 0 && (
+        {undoStack.length > 0 && (
           <button onClick={handleUndo} style={{ fontSize: '12px', padding: '2px 10px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4' }}>
-            Undo merge (⌘Z)
+            Undo {undoStack[undoStack.length - 1].type === 'merge' ? 'merge' : 'group move'} (⌘Z)
           </button>
         )}
         {dragging && (
-          <span style={{ color: '#888', fontStyle: 'italic' }}>Drop onto another category to merge</span>
+          <span style={{ color: '#888', fontStyle: 'italic' }}>Drop to move to that group; drop on the text label to merge</span>
         )}
+      </div>
+
+      <div style={{ marginBottom: '8px' }}>
+        <input
+          type="search"
+          value={catSearch}
+          onChange={e => setCatSearch(e.target.value)}
+          placeholder="Search categories…"
+          style={{ fontSize: '13px', padding: '4px 8px', border: '1px solid #ccc', borderRadius: '4px', width: '220px' }}
+        />
       </div>
 
       <div style={{ position: 'relative' }} ref={svgWrapperRef}>
@@ -448,6 +541,23 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
             <Tooltip content={<CustomTooltip />} animationDuration={0} wrapperStyle={{ zIndex: 10 }} />
           </Treemap>
         </ResponsiveContainer>
+        {dragLabel && dragging && (
+          <div style={{
+            position: 'absolute',
+            left: dragLabel.x, top: dragLabel.y,
+            width: dragLabel.width, height: dragLabel.height,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            pointerEvents: 'none', zIndex: 5,
+          }}>
+            <div style={{
+              background: 'rgba(0,0,0,0.72)', color: '#fff',
+              fontSize: '12px', fontWeight: 600,
+              padding: '4px 10px', borderRadius: '20px', whiteSpace: 'nowrap',
+            }}>
+              {dragLabel.text}
+            </div>
+          </div>
+        )}
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'hidden' }}>
           {twoLevelData.map(({ name, groupColorIndex }) => {
             const pos = groupPositions[name]
@@ -546,11 +656,12 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
           </thead>
           <tbody>
             {allData.map(({ name, value }, i) => {
-              const hidden   = hiddenNames.has(name)
-              const children = childrenOf.get(name) ?? []
+              const hidden    = hiddenNames.has(name)
+              const children  = childrenOf.get(name) ?? []
+              const matches   = !catSearch || name.toLowerCase().includes(catSearch.toLowerCase())
               return (
                 <Fragment key={name}>
-                  <tr style={{ background: hidden ? '#f0f0f0' : (i % 2 === 0 ? '#fff' : '#f4f6f8') }}>
+                  <tr style={{ background: matches && catSearch ? '#fffde7' : hidden ? '#f0f0f0' : (i % 2 === 0 ? '#fff' : '#f4f6f8'), opacity: catSearch && !matches ? 0.3 : 1 }}>
                     <td style={{ padding: '6px 12px', display: 'flex', alignItems: 'center', gap: '8px', opacity: hidden ? 0.4 : 1 }}>
                       <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '2px', background: COLORS[i % COLORS.length], flexShrink: 0 }} />
                       {name}
@@ -698,6 +809,9 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
               <span style={{ fontWeight: 400, fontSize: '13px', color: '#555' }}>{dollarFormatter(filteredRows.reduce((s, r) => s + parseMoney(r['Outflow']), 0))}</span>
               <button onClick={() => toggleHidden(selectedCategory)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>
                 {hiddenNames.has(selectedCategory) ? 'show' : 'hide'}
+              </button>
+              <button onClick={() => openSplitEditor(selectedCategory)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: `1px solid ${splits.has(selectedCategory) ? '#81c784' : '#bbb'}`, borderRadius: '3px', background: splits.has(selectedCategory) ? '#e8f5e9' : '#f4f4f4', color: splits.has(selectedCategory) ? '#27ae60' : '#555' }}>
+                split
               </button>
               <button onClick={() => setSelectedCategory(null)} style={{ marginLeft: 'auto', fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>✕</button>
             </div>

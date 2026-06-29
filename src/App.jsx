@@ -363,6 +363,7 @@ export default function App() {
             />
           </label>
           <button type="submit" style={{ padding: '4px 12px', fontSize: '14px' }}>Connect</button>
+          <a href="https://app.ynab.com/settings/developer" target="_blank" rel="noopener noreferrer" style={{ fontSize: '13px', color: '#2980b9' }}>Get API key</a>
         </form>
 
         {budgets.length > 0 && (
