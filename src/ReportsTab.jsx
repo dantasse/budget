@@ -196,6 +196,17 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     setUndoStack(prev => prev.filter(e => !(e.type === 'merge' && e.child === childName)))
   }, [])
 
+  const handleRenameGroup = useCallback((oldName, newName) => {
+    onRenameGroup(oldName, newName)
+    setGroupOverrides(prev => {
+      const next = new Map(prev)
+      for (const [cat, grp] of next) {
+        if (grp === oldName) next.set(cat, newName)
+      }
+      return next
+    })
+  }, [onRenameGroup])
+
   const handleUndo = useCallback(() => {
     const last = undoStack[undoStack.length - 1]
     if (!last) return
@@ -589,9 +600,9 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
                     autoFocus
                     value={editingGroup.value}
                     onChange={e => setEditingGroup(prev => ({ ...prev, value: e.target.value }))}
-                    onBlur={() => { onRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }}
+                    onBlur={() => { handleRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }}
                     onKeyDown={e => {
-                      if (e.key === 'Enter')  { e.stopPropagation(); onRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }
+                      if (e.key === 'Enter')  { e.stopPropagation(); handleRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }
                       if (e.key === 'Escape') { e.stopPropagation(); setEditingGroup(null) }
                     }}
                     style={{ background: 'transparent', border: 'none', outline: '1px solid rgba(255,255,255,0.8)', color: '#fff', fontSize: '11px', fontWeight: 700, fontFamily: 'sans-serif', width: '100%', padding: '0 4px', boxSizing: 'border-box' }}
