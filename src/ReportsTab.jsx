@@ -91,11 +91,11 @@ function classifyAll(rows, assignments, manualKeys, numParts) {
   return next
 }
 
-export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup }) {
+export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup }) {
   const hiddenKey        = `ynab_report_hidden_${budgetId}`
   const mergesKey        = `ynab_report_merges_${budgetId}`
   const splitsKey        = `ynab_report_splits_${budgetId}`
-  const groupOverridesKey = `ynab_report_groupoverrides_${budgetId}`
+  const groupOverridesKey = `ynab_report_groupoverrides_${budgetId}_${scenarioId}`
 
   const [hiddenNames, setHiddenNames] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem(hiddenKey)) ?? []) }
@@ -573,7 +573,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
           {twoLevelData.map(({ name, groupColorIndex }) => {
             const pos = groupPositions[name]
             if (!pos) return null
-            const color = COLORS[groupColorIndex % COLORS.length]
             const isEditing = editingGroup?.name === name
             return (
               <div
@@ -581,18 +580,11 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
                 onClick={() => { if (!isEditing) setEditingGroup({ name, value: name }) }}
                 style={{
                   position: 'absolute',
-                  left: pos.x,
-                  top: pos.y,
-                  width: pos.width,
-                  height: 20,
-                  background: color,
-                  display: 'flex',
-                  alignItems: 'center',
-                  paddingLeft: 6,
-                  boxSizing: 'border-box',
+                  left: pos.x + 6,
+                  top: pos.y + 4,
+                  maxWidth: pos.width - 12,
                   pointerEvents: 'auto',
                   cursor: 'text',
-                  borderBottom: '1px solid rgba(255,255,255,0.35)',
                 }}
               >
                 {isEditing ? (
@@ -605,10 +597,10 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
                       if (e.key === 'Enter')  { e.stopPropagation(); handleRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }
                       if (e.key === 'Escape') { e.stopPropagation(); setEditingGroup(null) }
                     }}
-                    style={{ background: 'transparent', border: 'none', outline: '1px solid rgba(255,255,255,0.8)', color: '#fff', fontSize: '11px', fontWeight: 700, fontFamily: 'sans-serif', width: '100%', padding: '0 4px', boxSizing: 'border-box' }}
+                    style={{ background: 'rgba(0,0,0,0.35)', border: 'none', outline: 'none', color: '#fff', fontSize: '12px', fontWeight: 700, fontFamily: 'sans-serif', width: '160px', padding: '0 2px', borderBottom: '1px solid rgba(255,255,255,0.7)' }}
                   />
                 ) : (
-                  <span style={{ color: '#fff', fontSize: '11px', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', userSelect: 'none' }}>
+                  <span style={{ color: '#fff', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap', userSelect: 'none', textShadow: '0 1px 3px rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.3)' }}>
                     {name}
                   </span>
                 )}

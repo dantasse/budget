@@ -423,7 +423,7 @@ export default function App() {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
         {activeTab === 'Categories'   && <CategoriesTab   rows={rows} selectedGroups={selectedGroups} onSelectedGroupsChange={setSelectedGroups} />}
-        {activeTab === 'Reports'      && <ReportsTab      rows={rows} selectedGroups={selectedGroups} budgetId={selectedBudgetId} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} />}
+        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} selectedGroups={selectedGroups} budgetId={selectedBudgetId} scenarioId={activeScenario} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} />}
       </div>
     </div>
   )
