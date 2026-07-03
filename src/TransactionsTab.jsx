@@ -247,8 +247,8 @@ function ResizableHeader({ colKey, width, onResize, onSort, sortDir, children })
   )
 }
 
-export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, hiddenCols = [] }) {
-  const [hideInflow,       setHideInflow]       = useState(true)
+export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, hiddenCols = [], onEditUndo, canEditUndo, columnLabels = {}, columnValues = {}, onSelectedChange }) {
+  const [hideInflow,       setHideInflow]       = useState(false)
   const [search,           setSearch]           = useState('')
   const [colWidths,        setColWidths]        = useState(DEFAULT_WIDTHS)
   const [sort,             setSort]             = useState({ key: 'Date', dir: 'desc' })
@@ -316,10 +316,18 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
   stateRef.current      = { focusedRowIndex, visibleRows, selectedIds }
   virtualizerRef.current = virtualizer
 
+  useEffect(() => { onSelectedChange?.(selectedIds) }, [selectedIds, onSelectedChange])
+
   useEffect(() => {
     const handler = (e) => {
       const tag = document.activeElement?.tagName
       const inInput = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
+
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        onEditUndo?.()
+        return
+      }
 
       if (e.key.toLowerCase() === 'k' && !e.ctrlKey && !e.metaKey && !inInput) {
         e.preventDefault()
@@ -358,7 +366,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [])
+  }, [onEditUndo])
 
   const virtualItems  = virtualizer.getVirtualItems()
   const paddingTop    = virtualItems.length > 0 ? virtualItems[0].start : 0
@@ -408,11 +416,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {isMainScenario && (
-        <div style={{ marginBottom: '8px', padding: '6px 12px', background: '#fff3e0', border: '1px solid #f5a623', borderRadius: '4px', fontSize: '13px', color: '#7a4f00' }}>
-          ⚠ You are editing real data
-        </div>
-      )}
+
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '8px', flexWrap: 'wrap' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
           <input
@@ -453,7 +457,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
 
       <div
         ref={scrollRef}
-        style={{ overflowX: 'auto', overflowY: 'auto', flex: 1, minHeight: 0, contain: 'strict', background: isMainScenario ? '#fff8f0' : undefined }}
+        style={{ overflowX: 'auto', overflowY: 'auto', flex: 1, minHeight: 0, contain: 'strict' }}
       >
         <table style={{ borderCollapse: 'collapse', fontSize: '13px', tableLayout: 'fixed', width: totalWidth }}>
           <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
@@ -467,7 +471,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
                   onResize={handleResize} onSort={handleSort}
                   sortDir={sort.key === key ? sort.dir : null}
                 >
-                  {key}
+                  {columnLabels[key] ?? key}
                 </ResizableHeader>
               ))}
             </tr>
@@ -528,7 +532,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
                               }}
                               style={{ width: '100%', boxSizing: 'border-box', border: 'none', outline: '1px solid #aac4e8', background: 'transparent', fontSize: '13px', fontFamily: 'inherit', padding: 0 }}
                             />
-                          : (row[key] ?? '')}
+                          : (columnValues[key] ? columnValues[key](row) : (row[key] ?? ''))}
                       </td>
                     )
                   })}

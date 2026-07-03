@@ -7,6 +7,10 @@ function parseMoney(val) {
   return parseFloat(val.replace(/[$,]/g, '')) || 0
 }
 
+function netSpend(row) {
+  return parseMoney(row['Outflow']) - parseMoney(row['Inflow'])
+}
+
 const COLORS = [
   '#2c3e50', '#2980b9', '#27ae60', '#8e44ad', '#e67e22',
   '#c0392b', '#16a085', '#d35400', '#7f8c8d', '#f39c12',
@@ -91,11 +95,10 @@ function classifyAll(rows, assignments, manualKeys, numParts) {
   return next
 }
 
-export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup }) {
-  const hiddenKey        = `ynab_report_hidden_${budgetId}`
-  const mergesKey        = `ynab_report_merges_${budgetId}`
-  const splitsKey        = `ynab_report_splits_${budgetId}`
-  const groupOverridesKey = `ynab_report_groupoverrides_${budgetId}_${scenarioId}`
+export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup, onMoveCategory, onApplySplit }) {
+  const hiddenKey  = `ynab_report_hidden_${budgetId}`
+  const mergesKey  = `ynab_report_merges_${budgetId}`
+  const splitsKey  = `ynab_report_splits_${budgetId}`
 
   const [hiddenNames, setHiddenNames] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem(hiddenKey)) ?? []) }
@@ -112,11 +115,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
     try { return new Map(JSON.parse(localStorage.getItem(splitsKey)) ?? []) }
     catch { return new Map() }
   })
-  // groupOverrides: Map<catName, groupName> — display-level group reassignment
-  const [groupOverrides, setGroupOverrides] = useState(() => {
-    try { return new Map(JSON.parse(localStorage.getItem(groupOverridesKey)) ?? []) }
-    catch { return new Map() }
-  })
   // undoStack: [{type:'merge',child}|{type:'groupMove',cat,prevGroup}] — not persisted
   const [undoStack,        setUndoStack]        = useState([])
   const [dragging,         setDragging]         = useState(null)
@@ -124,12 +122,19 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
   const [selectedCategory, setSelectedCategory] = useState(null)
   const [editingGroup,     setEditingGroup]     = useState(null) // { name, value } | null
   const [contextMenu,      setContextMenu]      = useState(null) // { x, y, name } | null
-  // editingSplit: { catName, parts: string[], assignments: {[txKey]: number}, manualKeys: Set<string> } | null
+  // editingSplit: { catName, parts, assignments, manualKeys, automatic } | null
   const [editingSplit,     setEditingSplit]     = useState(null)
+  // splitUndoStack: [{assignments, manualKeys}] — snapshots before each manual assignment
+  const [splitUndoStack,    setSplitUndoStack]    = useState([])
+  const [splitSelectedKeys, setSplitSelectedKeys] = useState(new Set())
+  // splitFocusedKey: key of card with keyboard focus, for shift+up/down range-select
+  const [splitFocusedKey,   setSplitFocusedKey]   = useState(null)
   const [groupPositions,   setGroupPositions]   = useState({})
   const [dragLabel,        setDragLabel]        = useState(null) // { text, x, y, width, height } | null
   const [catSearch,        setCatSearch]        = useState('')
   const svgWrapperRef = useRef(null)
+  // most-recent selection from the embedded detail-panel TransactionsTab; used to preload split parts
+  const detailSelectionRef = useRef(new Set())
 
   useEffect(() => {
     localStorage.setItem(hiddenKey, JSON.stringify([...hiddenNames]))
@@ -142,10 +147,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
   useEffect(() => {
     localStorage.setItem(splitsKey, JSON.stringify([...splits]))
   }, [splits, splitsKey])
-
-  useEffect(() => {
-    localStorage.setItem(groupOverridesKey, JSON.stringify([...groupOverrides]))
-  }, [groupOverrides, groupOverridesKey])
 
   useEffect(() => {
     const el = svgWrapperRef.current
@@ -186,6 +187,8 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
     return () => { document.body.style.cursor = '' }
   }, [dragging])
 
+  const splitStateRef = useRef({})
+
   const handleMerge = useCallback((fromName, toName) => {
     setMerges(prev => new Map(prev).set(fromName, toName))
     setUndoStack(prev => [...prev.filter(e => !(e.type === 'merge' && e.child === fromName)), { type: 'merge', child: fromName }])
@@ -196,37 +199,24 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
     setUndoStack(prev => prev.filter(e => !(e.type === 'merge' && e.child === childName)))
   }, [])
 
-  const handleRenameGroup = useCallback((oldName, newName) => {
-    onRenameGroup(oldName, newName)
-    setGroupOverrides(prev => {
-      const next = new Map(prev)
-      for (const [cat, grp] of next) {
-        if (grp === oldName) next.set(cat, newName)
-      }
-      return next
-    })
-  }, [onRenameGroup])
-
   const handleUndo = useCallback(() => {
     const last = undoStack[undoStack.length - 1]
     if (!last) return
     if (last.type === 'merge') {
       applyUngroup(last.child)
     } else {
-      setGroupOverrides(prev => {
-        const next = new Map(prev)
-        last.prevGroup === undefined ? next.delete(last.cat) : next.set(last.cat, last.prevGroup)
-        return next
-      })
+      onMoveCategory(last.cat, last.prevGroup)
       setUndoStack(prev => prev.slice(0, -1))
     }
-  }, [undoStack, applyUngroup])
+  }, [undoStack, applyUngroup, onMoveCategory])
+
+  const splitUndoRef = useRef(null)
 
   useEffect(() => {
     const handler = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault()
-        handleUndo()
+        splitUndoRef.current ? splitUndoRef.current() : handleUndo()
       }
     }
     document.addEventListener('keydown', handler)
@@ -246,10 +236,10 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
     for (const row of rows) {
       const label = labelFor(row)
       if (!label) continue
-      const outflow = parseMoney(row['Outflow'])
-      if (outflow === 0) continue
+      const net = netSpend(row)
+      if (net === 0) continue
       const target = merges.get(label) ?? label
-      totals.set(target, (totals.get(target) ?? 0) + outflow)
+      totals.set(target, (totals.get(target) ?? 0) + net)
     }
     return [...totals.entries()]
       .map(([name, value]) => ({ name, value: Math.round(value * 100) / 100 }))
@@ -262,9 +252,9 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
     for (const row of rows) {
       const label = labelFor(row)
       if (!label || !merges.has(label)) continue
-      const outflow = parseMoney(row['Outflow'])
-      if (outflow === 0) continue
-      totals.set(label, (totals.get(label) ?? 0) + outflow)
+      const net = netSpend(row)
+      if (net === 0) continue
+      totals.set(label, (totals.get(label) ?? 0) + net)
     }
     return totals
   }, [rows, labelFor, merges])
@@ -285,12 +275,12 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
     const splitOrigins = new Map()
     for (const row of rows) {
       if (!isRowSelected(row, selectedGroups)) continue
-      const outflow = parseMoney(row['Outflow'])
-      if (outflow === 0) continue
+      const net = netSpend(row)
+      if (net === 0) continue
       const baseGroup = row['Category Group'] || '(none)'
       const cat       = row['Category'] || baseGroup
       if (hiddenNames.has(cat)) continue
-      const group    = groupOverrides.get(cat) ?? baseGroup
+      const group    = baseGroup
       const splitDef = splits.get(cat)
       let effectiveCat = cat
       if (splitDef?.parts?.length >= 2) {
@@ -300,7 +290,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
         splitOrigins.set(effectiveCat, cat)
       }
       if (!groupMap.has(group)) groupMap.set(group, new Map())
-      groupMap.get(group).set(effectiveCat, (groupMap.get(group).get(effectiveCat) ?? 0) + outflow)
+      groupMap.get(group).set(effectiveCat, (groupMap.get(group).get(effectiveCat) ?? 0) + net)
     }
     return [...groupMap.entries()]
       .map(([gName, catMap], gi) => ({
@@ -314,6 +304,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
             _splitFrom: splitOrigins.get(cName),
             _groupName: gName,
           }))
+          .filter(c => c.value > 0)
           .sort((a, b) => b.value - a.value),
       }))
       .filter(g => g.children.length > 0)
@@ -322,22 +313,41 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
         const bSum = b.children.reduce((s, c) => s + c.value, 0)
         return bSum - aSum
       })
-  }, [rows, selectedGroups, hiddenNames, splits, groupOverrides])
+  }, [rows, selectedGroups, hiddenNames, splits])
 
   const filteredRows = useMemo(() => {
     if (!selectedCategory) return []
+    for (const [catName, splitDef] of splits) {
+      const partIdx = splitDef.parts.indexOf(selectedCategory)
+      if (partIdx !== -1) {
+        return rows.filter(r => {
+          if (!isRowSelected(r, selectedGroups)) return false
+          if ((r['Category'] || r['Category Group']) !== catName) return false
+          const key = `${r._txId}/${r._subTxId}`
+          return (splitDef.assignments[key] ?? 0) === partIdx
+        })
+      }
+    }
     return rows.filter(r => {
       if (!isRowSelected(r, selectedGroups)) return false
       return (r['Category'] || r['Category Group']) === selectedCategory
     })
-  }, [selectedCategory, rows, selectedGroups])
+  }, [selectedCategory, rows, selectedGroups, splits])
+
+  const selectedSplitFrom = useMemo(() => {
+    if (!selectedCategory) return null
+    for (const [catName, splitDef] of splits) {
+      if (splitDef.parts.includes(selectedCategory)) return catName
+    }
+    return null
+  }, [selectedCategory, splits])
 
   const splitEditorRows = useMemo(() => {
     if (!editingSplit) return []
     return rows.filter(r => {
       if (!isRowSelected(r, selectedGroups)) return false
       return (r['Category'] || r['Category Group']) === editingSplit.catName
-    })
+    }).sort((a, b) => (b['Date'] ?? '').localeCompare(a['Date'] ?? ''))
   }, [editingSplit?.catName, rows, selectedGroups])
 
   // per-part spending totals, recomputed as assignments change
@@ -346,44 +356,91 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
     return editingSplit.parts.map((_, i) =>
       splitEditorRows.reduce((s, r) => {
         const key = `${r._txId}/${r._subTxId}`
-        return s + ((editingSplit.assignments[key] ?? 0) === i ? parseMoney(r['Outflow']) : 0)
+        return s + ((editingSplit.assignments[key] ?? 0) === i ? netSpend(r) : 0)
       }, 0)
     )
   }, [editingSplit, splitEditorRows])
 
-  const openSplitEditor = (catName) => {
+  // Shift+Up/Down extends card selection within the focused card's column.
+  // Placed after splitEditorRows so the ref update is valid.
+  splitStateRef.current = { editingSplit, splitFocusedKey, splitSelectedKeys, splitEditorRows }
+  useEffect(() => {
+    const handler = (e) => {
+      if (!e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return
+      const { editingSplit, splitFocusedKey, splitEditorRows } = splitStateRef.current
+      if (!editingSplit || !splitFocusedKey) return
+      e.preventDefault()
+      const focusedPart = editingSplit.assignments[splitFocusedKey] ?? 0
+      const partKeys = splitEditorRows
+        .filter(r => (editingSplit.assignments[`${r._txId}/${r._subTxId}`] ?? 0) === focusedPart)
+        .map(r => `${r._txId}/${r._subTxId}`)
+      const idx = partKeys.indexOf(splitFocusedKey)
+      if (idx === -1) return
+      const nextIdx = e.key === 'ArrowDown' ? Math.min(idx + 1, partKeys.length - 1) : Math.max(idx - 1, 0)
+      if (nextIdx === idx) return
+      setSplitSelectedKeys(prev => new Set([...prev, partKeys[nextIdx]]))
+      setSplitFocusedKey(partKeys[nextIdx])
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [])
+
+  const openSplitEditor = (catName, preassignedKeys) => {
     const existing = splits.get(catName)
-    setEditingSplit({
-      catName,
-      parts: existing?.parts ?? [catName, ''],
-      assignments: existing?.assignments ?? {},
-      manualKeys: new Set(existing?.manualKeys ?? []),
-    })
+    let assignments  = { ...(existing?.assignments ?? {}) }
+    const manualKeys = new Set(existing?.manualKeys ?? [])
+    const parts      = existing?.parts ?? [catName, '']
+    if (preassignedKeys && preassignedKeys.size > 0) {
+      for (const k of preassignedKeys) {
+        assignments[k] = 1
+        manualKeys.add(k)
+      }
+      const editorRows = rows.filter(r =>
+        isRowSelected(r, selectedGroups) && (r['Category'] || r['Category Group']) === catName
+      )
+      const reclassified = classifyAll(editorRows, assignments, manualKeys, parts.length)
+      if (reclassified) assignments = reclassified
+    }
+    setEditingSplit({ catName, parts, assignments, manualKeys, automatic: true })
+    setSplitUndoStack([])
+    setSplitSelectedKeys(new Set())
+    setSplitFocusedKey(null)
     setSelectedCategory(null)
   }
 
-  // Called when user drags a transaction card to a column.
-  // Marks the transaction as ground truth, then re-classifies all non-manual rows.
-  const handleManualAssign = (txKey, partIdx) => {
+  const assignToSplitPart = (txKeys, partIdx) => {
+    setSplitUndoStack(prev => [...prev, { assignments: editingSplit.assignments, manualKeys: new Set(editingSplit.manualKeys) }])
     setEditingSplit(prev => {
       const manualKeys = new Set(prev.manualKeys)
-      manualKeys.add(txKey)
-      const assignments = { ...prev.assignments, [txKey]: partIdx }
-      const reclassified = classifyAll(splitEditorRows, assignments, manualKeys, prev.parts.length)
-      return { ...prev, assignments: reclassified ?? assignments, manualKeys }
+      txKeys.forEach(k => manualKeys.add(k))
+      let assignments = { ...prev.assignments }
+      txKeys.forEach(k => { assignments[k] = partIdx })
+      if (prev.automatic) {
+        const reclassified = classifyAll(splitEditorRows, assignments, manualKeys, prev.parts.length)
+        if (reclassified) assignments = reclassified
+      }
+      return { ...prev, assignments, manualKeys }
     })
+    setSplitSelectedKeys(new Set())
+    setSplitFocusedKey(null)
+  }
+
+  const handleSplitUndo = () => {
+    const last = splitUndoStack[splitUndoStack.length - 1]
+    if (!last) return
+    setEditingSplit(prev => ({ ...prev, assignments: last.assignments, manualKeys: last.manualKeys }))
+    setSplitUndoStack(prev => prev.slice(0, -1))
   }
 
   const saveSplit = () => {
-    const validParts = editingSplit.parts.map(p => p.trim()).filter(Boolean)
+    const { catName, parts, assignments } = editingSplit
+    const validParts = parts.map(p => p.trim()).filter(Boolean)
     if (validParts.length < 2) return
+    onApplySplit(splitEditorRows, validParts, assignments)
     setSplits(prev => {
       const next = new Map(prev)
-      next.set(editingSplit.catName, {
-        parts: validParts,
-        assignments: editingSplit.assignments,
-        manualKeys: [...editingSplit.manualKeys],
-      })
+      next.delete(catName)
+      for (const part of validParts) next.delete(part)
       return next
     })
     setEditingSplit(null)
@@ -425,20 +482,16 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
             if (dropTarget === name || sameGroup) {
               handleMerge(dragging, name)
             } else {
-              const prevGroup = groupOverrides.get(dragging)
+              const prevGroup = twoLevelData.find(g => g.children.some(c => c.name === dragging))?.name
               setUndoStack(prev => [...prev, { type: 'groupMove', cat: dragging, prevGroup }])
-              setGroupOverrides(prev => new Map(prev).set(dragging, _groupName))
+              onMoveCategory(dragging, _groupName)
             }
             setDragging(null)
             setDropTarget(null)
             setDragLabel(null)
           } else if (dragging === name) {
-            if (_splitFrom) {
-              openSplitEditor(_splitFrom)
-            } else {
-              setSelectedCategory(prev => prev === name ? null : name)
-              setEditingSplit(null)
-            }
+            setSelectedCategory(prev => prev === name ? null : name)
+            setEditingSplit(null)
             setDragging(null)
           }
         }}
@@ -514,6 +567,8 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
       next.has(name) ? next.delete(name) : next.add(name)
       return next
     })
+
+  splitUndoRef.current = editingSplit && splitUndoStack.length > 0 ? handleSplitUndo : null
 
   if (rows.length === 0) return (
     <div style={{ color: '#555', padding: '24px 0' }}>No data loaded.</div>
@@ -592,9 +647,9 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
                     autoFocus
                     value={editingGroup.value}
                     onChange={e => setEditingGroup(prev => ({ ...prev, value: e.target.value }))}
-                    onBlur={() => { handleRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }}
+                    onBlur={() => { onRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }}
                     onKeyDown={e => {
-                      if (e.key === 'Enter')  { e.stopPropagation(); handleRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }
+                      if (e.key === 'Enter')  { e.stopPropagation(); onRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }
                       if (e.key === 'Escape') { e.stopPropagation(); setEditingGroup(null) }
                     }}
                     style={{ background: 'rgba(0,0,0,0.35)', border: 'none', outline: 'none', color: '#fff', fontSize: '12px', fontWeight: 700, fontFamily: 'sans-serif', width: '160px', padding: '0 2px', borderBottom: '1px solid rgba(255,255,255,0.7)' }}
@@ -713,10 +768,30 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
 
         {editingSplit ? (
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', height: '520px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', flexShrink: 0, flexWrap: 'wrap' }}>
               <span style={{ fontWeight: 600, fontSize: '14px', color: '#2c3e50' }}>
                 Split: <em style={{ fontWeight: 400 }}>{editingSplit.catName}</em>
               </span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: '#555', cursor: 'pointer', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={editingSplit.automatic}
+                  onChange={() => setEditingSplit(prev => {
+                    const automatic = !prev.automatic
+                    if (automatic && prev.manualKeys.size > 0) {
+                      const reclassified = classifyAll(splitEditorRows, prev.assignments, prev.manualKeys, prev.parts.length)
+                      return { ...prev, automatic, assignments: reclassified ?? prev.assignments }
+                    }
+                    return { ...prev, automatic }
+                  })}
+                />
+                Automatic
+              </label>
+              {splitUndoStack.length > 0 && (
+                <button onClick={handleSplitUndo} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>
+                  Undo (⌘Z)
+                </button>
+              )}
               <button
                 onClick={() => setEditingSplit(prev => ({ ...prev, parts: [...prev.parts, ''] }))}
                 style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}
@@ -735,6 +810,8 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
                 const partRows = splitEditorRows.filter(r =>
                   (editingSplit.assignments[`${r._txId}/${r._subTxId}`] ?? 0) === partIdx
                 )
+                const partKeys = partRows.map(r => `${r._txId}/${r._subTxId}`)
+                const selectedHere = partKeys.filter(k => splitSelectedKeys.has(k))
                 return (
                   <div
                     key={partIdx}
@@ -742,7 +819,9 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
                     onDrop={e => {
                       e.preventDefault()
                       const key = e.dataTransfer.getData('text/plain')
-                      if (key) handleManualAssign(key, partIdx)
+                      if (!key) return
+                      const keys = splitSelectedKeys.has(key) ? [...splitSelectedKeys] : [key]
+                      assignToSplitPart(keys, partIdx)
                     }}
                     style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}
                   >
@@ -757,9 +836,19 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
                         placeholder="Sub-category name"
                         style={{ width: '100%', fontSize: '13px', fontWeight: 600, padding: '4px 6px', border: '1px solid #ccc', borderRadius: '3px', boxSizing: 'border-box' }}
                       />
-                      <div style={{ fontSize: '12px', color: '#27ae60', fontWeight: 600, marginTop: '2px', paddingLeft: '2px' }}>
-                        {dollarFormatter(splitPartTotals[partIdx] ?? 0)}
-                        <span style={{ fontWeight: 400, color: '#999', marginLeft: '6px' }}>{partRows.length} transactions</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px', paddingLeft: '2px' }}>
+                        <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 600 }}>
+                          {dollarFormatter(splitPartTotals[partIdx] ?? 0)}
+                          <span style={{ fontWeight: 400, color: '#999', marginLeft: '6px' }}>{partRows.length} transactions</span>
+                        </span>
+                        {splitSelectedKeys.size > 0 && (
+                          <button
+                            onClick={() => assignToSplitPart([...splitSelectedKeys], partIdx)}
+                            style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #2980b9', borderRadius: '3px', background: '#2980b9', color: '#fff' }}
+                          >
+                            Assign {splitSelectedKeys.size} here
+                          </button>
+                        )}
                       </div>
                     </div>
                     <div style={{
@@ -770,29 +859,66 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
                       padding: '6px',
                       border: '2px dashed transparent',
                     }}>
-                      {partRows.map(row => {
+                      {partRows.map((row, rowIdx) => {
                         const key = `${row._txId}/${row._subTxId}`
                         const isManual = editingSplit.manualKeys.has(key)
+                        const isSelected = splitSelectedKeys.has(key)
+                        const isFocused = splitFocusedKey === key
                         return (
                           <div
                             key={key}
                             draggable
                             onDragStart={e => e.dataTransfer.setData('text/plain', key)}
+                            onClick={e => {
+                              if (e.shiftKey && splitFocusedKey) {
+                                // range-select from focused key to this key within the column
+                                const focusIdx = partKeys.indexOf(splitFocusedKey)
+                                const lo = Math.min(focusIdx, rowIdx)
+                                const hi = Math.max(focusIdx, rowIdx)
+                                setSplitSelectedKeys(prev => new Set([...prev, ...partKeys.slice(lo, hi + 1)]))
+                              } else {
+                                setSplitSelectedKeys(new Set([key]))
+                              }
+                              setSplitFocusedKey(key)
+                            }}
                             style={{
                               padding: '6px 8px',
                               marginBottom: '4px',
-                              background: isManual ? '#e8f5e9' : '#fff',
-                              border: `1px solid ${isManual ? '#81c784' : '#ddd'}`,
+                              background: isSelected ? '#e3f2fd' : isManual ? '#e8f5e9' : '#fff',
+                              border: `1px solid ${isSelected ? '#90caf9' : isManual ? '#81c784' : '#ddd'}`,
+                              outline: isFocused ? '2px solid #2980b9' : 'none',
+                              outlineOffset: '-2px',
                               borderRadius: '4px',
                               cursor: 'grab',
                               fontSize: '12px',
                               userSelect: 'none',
                             }}
                           >
-                            <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {row['Payee']}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => {
+                                  setSplitSelectedKeys(prev => {
+                                    const next = new Set(prev)
+                                    next.has(key) ? next.delete(key) : next.add(key)
+                                    return next
+                                  })
+                                  setSplitFocusedKey(key)
+                                }}
+                                onClick={e => e.stopPropagation()}
+                                style={{ flexShrink: 0, cursor: 'pointer' }}
+                              />
+                              <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                                {row['Payee']}
+                              </div>
                             </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '2px', color: '#888' }}>
+                            {row['Memo'] && (
+                              <div style={{ fontSize: '11px', color: '#999', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: '22px', marginTop: '1px' }}>
+                                {row['Memo']}
+                              </div>
+                            )}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '2px', color: '#888', paddingLeft: '22px' }}>
                               <span>{row['Date']}</span>
                               <span style={{ fontWeight: 500, color: '#555' }}>{row['Outflow']}</span>
                             </div>
@@ -809,11 +935,14 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '8px', color: '#2c3e50', display: 'flex', alignItems: 'baseline', gap: '12px' }}>
               {selectedCategory}
-              <span style={{ fontWeight: 400, fontSize: '13px', color: '#555' }}>{dollarFormatter(filteredRows.reduce((s, r) => s + parseMoney(r['Outflow']), 0))}</span>
-              <button onClick={() => toggleHidden(selectedCategory)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>
-                {hiddenNames.has(selectedCategory) ? 'show' : 'hide'}
+              {selectedSplitFrom && (
+                <span style={{ fontWeight: 400, fontSize: '12px', color: '#888' }}>ex {selectedSplitFrom}</span>
+              )}
+              <span style={{ fontWeight: 400, fontSize: '13px', color: '#555' }}>{dollarFormatter(filteredRows.reduce((s, r) => s + netSpend(r), 0))}</span>
+              <button onClick={() => toggleHidden(selectedSplitFrom ?? selectedCategory)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>
+                {hiddenNames.has(selectedSplitFrom ?? selectedCategory) ? 'show' : 'hide'}
               </button>
-              <button onClick={() => openSplitEditor(selectedCategory)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: `1px solid ${splits.has(selectedCategory) ? '#81c784' : '#bbb'}`, borderRadius: '3px', background: splits.has(selectedCategory) ? '#e8f5e9' : '#f4f4f4', color: splits.has(selectedCategory) ? '#27ae60' : '#555' }}>
+              <button onClick={() => openSplitEditor(selectedSplitFrom ?? selectedCategory, detailSelectionRef.current)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: `1px solid ${splits.has(selectedSplitFrom ?? selectedCategory) ? '#81c784' : '#bbb'}`, borderRadius: '3px', background: splits.has(selectedSplitFrom ?? selectedCategory) ? '#e8f5e9' : '#f4f4f4', color: splits.has(selectedSplitFrom ?? selectedCategory) ? '#27ae60' : '#555' }}>
                 split
               </button>
               <button onClick={() => setSelectedCategory(null)} style={{ marginLeft: 'auto', fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>✕</button>
@@ -827,6 +956,13 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, scenarioId,
                 onUpdateMemo={onUpdateMemo}
                 isMainScenario={isMainScenario}
                 hiddenCols={['Account', 'Inflow']}
+                onSelectedChange={s => { detailSelectionRef.current = s }}
+                columnLabels={{ Outflow: 'Net spend' }}
+                columnValues={{ Outflow: r => {
+                  const net = netSpend(r)
+                  if (net === 0) return ''
+                  return net > 0 ? dollarFormatter(net) : `-${dollarFormatter(-net)}`
+                }}}
               />
             </div>
           </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import TransactionsTab from './TransactionsTab'
 import CategoriesTab from './CategoriesTab'
 import ReportsTab from './ReportsTab'
@@ -71,6 +71,7 @@ function applyEdits(baseRows, edits) {
 
 function scenarioEditsKey(budgetId, name) { return `ynab_scenario_${budgetId}_${name}` }
 function scenariosListKey(budgetId)       { return `ynab_scenarios_${budgetId}` }
+function localCatsKey(budgetId, name)     { return `ynab_localcats_${budgetId}_${name}` }
 
 function loadScenarioEdits(budgetId, name) {
   try { return JSON.parse(localStorage.getItem(scenarioEditsKey(budgetId, name))) ?? {} }
@@ -80,6 +81,17 @@ function loadScenarioEdits(budgetId, name) {
 function saveScenarioEdits(budgetId, name, edits) {
   localStorage.setItem(scenarioEditsKey(budgetId, name), JSON.stringify(edits))
 }
+
+function loadLocalCats(budgetId, name) {
+  try { return JSON.parse(localStorage.getItem(localCatsKey(budgetId, name))) ?? {} }
+  catch { return {} }
+}
+
+function saveLocalCats(budgetId, name, cats) {
+  localStorage.setItem(localCatsKey(budgetId, name), JSON.stringify(cats))
+}
+
+function localCatId(groupName, name) { return `local:${groupName}:${name}` }
 
 function loadScenariosList(budgetId) {
   try { return JSON.parse(localStorage.getItem(scenariosListKey(budgetId))) ?? [MAIN] }
@@ -100,10 +112,14 @@ export default function App() {
   const [scenarios,        setScenarios]        = useState([MAIN])
   const [activeScenario,   setActiveScenario]   = useState(MAIN)
   const [scenarioEdits,    setScenarioEdits]    = useState({})
+  // localCategories: { [id]: { name, groupName } } — scenario-scoped extra categories (e.g., from splits)
+  const [localCategories,  setLocalCategories]  = useState({})
   const [newScenarioInput, setNewScenarioInput] = useState(null) // null = hidden, string = visible
   // txSubsById: Map<txId, Array<{id, amount, category_id, memo}>> — full subtransaction list per split tx,
   // needed to reconstruct the complete array when patching a single subtransaction's category.
   const txSubsById = useRef(new Map())
+  const [editLiveData,     setEditLiveData]     = useState(false)
+  const [editUndoStack,    setEditUndoStack]    = useState([])
   const [loading,          setLoading]          = useState(false)
   const [error,            setError]            = useState(null)
   const [activeTab,        setActiveTab]        = useState('Transactions')
@@ -130,6 +146,7 @@ export default function App() {
     const defaultScenario = loadedScenarios.find(s => s !== MAIN) ?? MAIN
     setActiveScenario(defaultScenario)
     setScenarioEdits(loadScenarioEdits(selectedBudgetId, defaultScenario))
+    setLocalCategories(loadLocalCats(selectedBudgetId, defaultScenario))
     Promise.all([
       apiFetch(`/budgets/${selectedBudgetId}/transactions`, token),
       apiFetch(`/budgets/${selectedBudgetId}/categories`, token),
@@ -190,6 +207,9 @@ export default function App() {
     }
     setActiveScenario(name)
     setScenarioEdits(selectedBudgetId ? loadScenarioEdits(selectedBudgetId, name) : {})
+    setLocalCategories(selectedBudgetId ? loadLocalCats(selectedBudgetId, name) : {})
+    setEditLiveData(false)
+    setEditUndoStack([])
   }
 
   const handleCreateScenario = (e) => {
@@ -201,7 +221,10 @@ export default function App() {
     saveScenariosList(selectedBudgetId, next)
     setActiveScenario(name)
     setScenarioEdits({})
+    setLocalCategories({})
     setNewScenarioInput(null)
+    setEditLiveData(false)
+    setEditUndoStack([])
   }
 
   function resolveCategory(newCategoryId) {
@@ -209,8 +232,21 @@ export default function App() {
       const cat = group.categories.find(c => c.id === newCategoryId)
       if (cat) return { newGroup: group.name, newName: cat.name }
     }
+    const local = localCategories[newCategoryId]
+    if (local) return { newGroup: local.groupName, newName: local.name }
     return { newGroup: '', newName: '' }
   }
+
+  const mergedCategoryGroups = useMemo(() => {
+    if (Object.keys(localCategories).length === 0) return categoryGroups
+    const groupsByName = new Map(categoryGroups.map(g => [g.name, { ...g, categories: [...g.categories] }]))
+    for (const [id, { name, groupName }] of Object.entries(localCategories)) {
+      if (!groupsByName.has(groupName)) groupsByName.set(groupName, { id: `local-group:${groupName}`, name: groupName, categories: [] })
+      const g = groupsByName.get(groupName)
+      if (!g.categories.some(c => c.id === id)) g.categories.push({ id, name })
+    }
+    return [...groupsByName.values()]
+  }, [categoryGroups, localCategories])
 
   function buildSplitBody(txId, changedSubIds, patch) {
     const allSubs = txSubsById.current.get(txId) ?? []
@@ -235,9 +271,49 @@ export default function App() {
     })
   }
 
+  const pushEditSnapshot = (keys) => {
+    // live edits go to YNAB API and can't be reverted locally
+    if (activeScenario === MAIN) return
+    const prevEdits = {}
+    for (const key of keys) {
+      if (key in scenarioEdits) prevEdits[key] = scenarioEdits[key]
+    }
+    setEditUndoStack(prev => [...prev, { prevEdits, keys }])
+  }
+
+  const handleEditUndo = useCallback(() => {
+    setEditUndoStack(prev => {
+      if (prev.length === 0) return prev
+      const last = prev[prev.length - 1]
+      setScenarioEdits(current => {
+        const next = { ...current }
+        for (const key of last.keys) {
+          key in last.prevEdits ? (next[key] = last.prevEdits[key]) : delete next[key]
+        }
+        saveScenarioEdits(selectedBudgetId, activeScenario, next)
+        return next
+      })
+      return prev.slice(0, -1)
+    })
+  }, [selectedBudgetId, activeScenario])
+
+  const moveCategory = (catName, newGroupName) => {
+    if (activeScenario === MAIN && !editLiveData) return
+    updateEdits(prev => {
+      const next = { ...prev }
+      for (const row of rows) {
+        if ((row['Category'] || row['Category Group']) !== catName) continue
+        const key = `${row._txId}/${row._subTxId}`
+        next[key] = { ...(prev[key] ?? {}), 'Category Group': newGroupName }
+      }
+      return next
+    })
+  }
+
   const renameGroup = (originalName, newName) => {
     const trimmed = newName.trim()
     if (!trimmed || trimmed === originalName) return
+    if (activeScenario === MAIN && !editLiveData) return
     updateEdits(prev => {
       const next = { ...prev }
       for (const row of rows) {
@@ -249,10 +325,45 @@ export default function App() {
     })
   }
 
+  const applySplit = (splitRows, validParts, assignments) => {
+    if (activeScenario === MAIN && !editLiveData) return
+    const groupName = splitRows[0]?.['Category Group'] ?? ''
+    const allKeys = splitRows.map(r => `${r._txId}/${r._subTxId}`)
+    pushEditSnapshot(allKeys)
+
+    // Register a local category per part (scenarios only; MAIN's split is view-only).
+    if (activeScenario !== MAIN) {
+      setLocalCategories(prev => {
+        const next = { ...prev }
+        for (const partName of validParts) {
+          const id = localCatId(groupName, partName)
+          if (!next[id]) next[id] = { name: partName, groupName }
+        }
+        saveLocalCats(selectedBudgetId, activeScenario, next)
+        return next
+      })
+    }
+
+    updateEdits(prev => {
+      const next = { ...prev }
+      for (const r of splitRows) {
+        const key = `${r._txId}/${r._subTxId}`
+        const partIdx = assignments[key] ?? 0
+        const partName = validParts[partIdx] ?? validParts[0]
+        const patch = { 'Category': partName, 'Category Group': groupName }
+        if (activeScenario !== MAIN) patch._categoryId = localCatId(groupName, partName)
+        next[key] = { ...(prev[key] ?? {}), ...patch }
+      }
+      return next
+    })
+  }
+
   const updateCategory = async (txId, subTxId, newCategoryId) => {
+    if (activeScenario === MAIN && !editLiveData) return
     const { newGroup, newName } = resolveCategory(newCategoryId)
     const rowPatch = { _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
     const key = `${txId}/${subTxId}`
+    pushEditSnapshot([key])
 
     if (activeScenario !== MAIN) {
       updateEdits(prev => ({ ...prev, [key]: { ...prev[key], ...rowPatch } }))
@@ -277,6 +388,8 @@ export default function App() {
   }
 
   const bulkUpdateCategory = async (rowKeys, newCategoryId) => {
+    if (activeScenario === MAIN && !editLiveData) return
+    pushEditSnapshot(rowKeys)
     const { newGroup, newName } = resolveCategory(newCategoryId)
     const keySet = new Set(rowKeys)
     const rowPatch = { _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
@@ -323,6 +436,8 @@ export default function App() {
   }
 
   const updateMemo = async (txId, subTxId, newMemo) => {
+    if (activeScenario === MAIN && !editLiveData) return
+    pushEditSnapshot([`${txId}/${subTxId}`])
     const rowPatch = { 'Memo': newMemo }
     const key = `${txId}/${subTxId}`
 
@@ -405,25 +520,35 @@ export default function App() {
       </div>
 
       {activeScenario === MAIN && selectedBudgetId && (
-        <div style={{ marginBottom: '8px', padding: '6px 12px', background: '#fff3e0', border: '1px solid #f5a623', borderRadius: '4px', fontSize: '13px', color: '#7a4f00' }}>
-          ⚠ You are editing real data
+        <div style={{ marginBottom: '8px', padding: '6px 12px', background: '#fff3e0', border: '1px solid #f5a623', borderRadius: '4px', fontSize: '13px', color: '#7a4f00', display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <span>You're on the main branch</span>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', userSelect: 'none' }}>
+            Edit live data?
+            <input type="checkbox" checked={editLiveData} onChange={e => setEditLiveData(e.target.checked)} style={{ cursor: 'pointer' }} />
+            <span style={{ fontWeight: 600 }}>{editLiveData ? 'On' : 'Off'}</span>
+          </label>
         </div>
       )}
       {loading && <p style={{ color: '#555' }}>Loading…</p>}
       {error   && <p style={{ color: 'red'  }}>{error}</p>}
 
-      <div style={{ borderBottom: '1px solid #ddd', marginBottom: '20px' }}>
+      <div style={{ borderBottom: '1px solid #ddd', marginBottom: '20px', display: 'flex', alignItems: 'center' }}>
         {TABS.map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={TAB_STYLE(activeTab === tab)}>
             {tab}
           </button>
         ))}
+        {editUndoStack.length > 0 && (
+          <button onClick={handleEditUndo} style={{ marginLeft: '16px', fontSize: '12px', padding: '2px 10px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4' }}>
+            Undo (⌘Z)
+          </button>
+        )}
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
+        {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onEditUndo={handleEditUndo} canEditUndo={editUndoStack.length > 0} />}
         {activeTab === 'Categories'   && <CategoriesTab   rows={rows} selectedGroups={selectedGroups} onSelectedGroupsChange={setSelectedGroups} />}
-        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} selectedGroups={selectedGroups} budgetId={selectedBudgetId} scenarioId={activeScenario} categoryGroups={categoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} />}
+        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} selectedGroups={selectedGroups} budgetId={selectedBudgetId} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} onMoveCategory={moveCategory} onApplySplit={applySplit} />}
       </div>
     </div>
   )
