@@ -247,8 +247,7 @@ function ResizableHeader({ colKey, width, onResize, onSort, sortDir, children })
   )
 }
 
-export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, hiddenCols = [], onEditUndo, canEditUndo, columnLabels = {}, columnValues = {}, onSelectedChange }) {
-  const [hideInflow,       setHideInflow]       = useState(false)
+export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, hiddenCols = [], columnLabels = {}, columnValues = {}, onSelectedChange }) {
   const [search,           setSearch]           = useState('')
   const [colWidths,        setColWidths]        = useState(DEFAULT_WIDTHS)
   const [sort,             setSort]             = useState({ key: 'Date', dir: 'desc' })
@@ -291,7 +290,6 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
 
   const searchLower = search.toLowerCase()
   const filteredRows = rows
-    .filter(r => !hideInflow || parseMoney(r['Inflow']) === 0)
     .filter(r => !searchLower || COLUMNS.some(({ key }) => String(r[key] ?? '').toLowerCase().includes(searchLower)))
 
   const visibleRows = sort.key
@@ -322,12 +320,6 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
     const handler = (e) => {
       const tag = document.activeElement?.tagName
       const inInput = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
-
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
-        e.preventDefault()
-        onEditUndo?.()
-        return
-      }
 
       if (e.key.toLowerCase() === 'k' && !e.ctrlKey && !e.metaKey && !inInput) {
         e.preventDefault()
@@ -366,7 +358,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [onEditUndo])
+  }, [])
 
   const virtualItems  = virtualizer.getVirtualItems()
   const paddingTop    = virtualItems.length > 0 ? virtualItems[0].start : 0
@@ -418,14 +410,6 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '8px', flexWrap: 'wrap' }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={hideInflow}
-            onChange={(e) => setHideInflow(e.target.checked)}
-          />
-          Hide inflow rows
-        </label>
         <input
           type="search"
           value={search}

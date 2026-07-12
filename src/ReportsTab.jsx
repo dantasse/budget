@@ -34,13 +34,8 @@ function CustomTooltip({ active, payload }) {
   )
 }
 
-function isRowSelected(row, selectedGroups) {
-  if (!selectedGroups) return true
-  const group = row['Category Group']
-  const cat   = row['Category']
-  if (selectedGroups.has(`group:${group}`)) return true
-  if (cat && selectedGroups.has(`cat:${group}:${cat}`)) return true
-  return false
+function rowLabel(row) {
+  return row['Category'] || row['Category Group']
 }
 
 function tokenize(str) {
@@ -95,10 +90,11 @@ function classifyAll(rows, assignments, manualKeys, numParts) {
   return next
 }
 
-export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup, onMoveCategory, onApplySplit }) {
-  const hiddenKey  = `ynab_report_hidden_${budgetId}`
-  const mergesKey  = `ynab_report_merges_${budgetId}`
-  const splitsKey  = `ynab_report_splits_${budgetId}`
+export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup, onMoveCategory, onApplySplit, onPushUndo, onRemoveUndos }) {
+  const hiddenKey  = `ynab_report_hidden_${budgetId}_${scenario}`
+  const mergesKey  = `ynab_report_merges_${budgetId}_${scenario}`
+  const splitsKey  = `ynab_report_splits_${budgetId}_${scenario}`
+  const lumpsKey   = `ynab_report_lumps_${budgetId}_${scenario}`
 
   const [hiddenNames, setHiddenNames] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem(hiddenKey)) ?? []) }
@@ -115,8 +111,11 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     try { return new Map(JSON.parse(localStorage.getItem(splitsKey)) ?? []) }
     catch { return new Map() }
   })
-  // undoStack: [{type:'merge',child}|{type:'groupMove',cat,prevGroup}] — not persisted
-  const [undoStack,        setUndoStack]        = useState([])
+  // lumpedGroups: Set<groupName> — groups displayed as a single cell instead of per-category cells
+  const [lumpedGroups, setLumpedGroups] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(lumpsKey)) ?? []) }
+    catch { return new Set() }
+  })
   const [dragging,         setDragging]         = useState(null)
   const [dropTarget,       setDropTarget]       = useState(null)
   const [selectedCategory, setSelectedCategory] = useState(null)
@@ -124,8 +123,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
   const [contextMenu,      setContextMenu]      = useState(null) // { x, y, name } | null
   // editingSplit: { catName, parts, assignments, manualKeys, automatic } | null
   const [editingSplit,     setEditingSplit]     = useState(null)
-  // splitUndoStack: [{assignments, manualKeys}] — snapshots before each manual assignment
-  const [splitUndoStack,    setSplitUndoStack]    = useState([])
   const [splitSelectedKeys, setSplitSelectedKeys] = useState(new Set())
   // splitFocusedKey: key of card with keyboard focus, for shift+up/down range-select
   const [splitFocusedKey,   setSplitFocusedKey]   = useState(null)
@@ -147,6 +144,10 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
   useEffect(() => {
     localStorage.setItem(splitsKey, JSON.stringify([...splits]))
   }, [splits, splitsKey])
+
+  useEffect(() => {
+    localStorage.setItem(lumpsKey, JSON.stringify([...lumpedGroups]))
+  }, [lumpedGroups, lumpsKey])
 
   useEffect(() => {
     const el = svgWrapperRef.current
@@ -189,52 +190,45 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
 
   const splitStateRef = useRef({})
 
+  const doUngroup = useCallback((childName) => {
+    setMerges(prev => { const next = new Map(prev); next.delete(childName); return next })
+  }, [])
+
   const handleMerge = useCallback((fromName, toName) => {
     setMerges(prev => new Map(prev).set(fromName, toName))
-    setUndoStack(prev => [...prev.filter(e => !(e.type === 'merge' && e.child === fromName)), { type: 'merge', child: fromName }])
-  }, [])
+    onRemoveUndos(e => e.key === `merge:${fromName}`)
+    onPushUndo({ label: 'merge', scope: 'reports', key: `merge:${fromName}`, undo: () => doUngroup(fromName) })
+  }, [onPushUndo, onRemoveUndos, doUngroup])
 
   const applyUngroup = useCallback((childName) => {
-    setMerges(prev => { const next = new Map(prev); next.delete(childName); return next })
-    setUndoStack(prev => prev.filter(e => !(e.type === 'merge' && e.child === childName)))
-  }, [])
+    doUngroup(childName)
+    onRemoveUndos(e => e.key === `merge:${childName}`)
+  }, [doUngroup, onRemoveUndos])
 
-  const handleUndo = useCallback(() => {
-    const last = undoStack[undoStack.length - 1]
-    if (!last) return
-    if (last.type === 'merge') {
-      applyUngroup(last.child)
-    } else {
-      onMoveCategory(last.cat, last.prevGroup)
-      setUndoStack(prev => prev.slice(0, -1))
-    }
-  }, [undoStack, applyUngroup, onMoveCategory])
+  const toggleLump = useCallback((groupName) => {
+    const wasLumped = lumpedGroups.has(groupName)
+    onPushUndo({ label: wasLumped ? 'split' : 'lump', scope: 'reports', undo: () => setLumpedGroups(prev => {
+      const next = new Set(prev)
+      wasLumped ? next.add(groupName) : next.delete(groupName)
+      return next
+    })})
+    setLumpedGroups(prev => {
+      const next = new Set(prev)
+      next.has(groupName) ? next.delete(groupName) : next.add(groupName)
+      return next
+    })
+  }, [lumpedGroups, onPushUndo])
 
-  const splitUndoRef = useRef(null)
-
+  // this component's undo closures die with it, so drop them from the app stack on unmount
   useEffect(() => {
-    const handler = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
-        e.preventDefault()
-        splitUndoRef.current ? splitUndoRef.current() : handleUndo()
-      }
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [handleUndo])
-
-  const labelFor = useCallback((row) => {
-    if (!isRowSelected(row, selectedGroups)) return null
-    const group = row['Category Group']
-    const cat   = row['Category']
-    return selectedGroups?.has(`group:${group}`) ? group : (cat || group)
-  }, [selectedGroups])
+    return () => onRemoveUndos(e => e.scope === 'reports' || e.scope === 'splitEditor')
+  }, [onRemoveUndos])
 
   // allData: child spending is rolled up into the parent
   const allData = useMemo(() => {
     const totals = new Map()
     for (const row of rows) {
-      const label = labelFor(row)
+      const label = rowLabel(row)
       if (!label) continue
       const net = netSpend(row)
       if (net === 0) continue
@@ -244,20 +238,20 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     return [...totals.entries()]
       .map(([name, value]) => ({ name, value: Math.round(value * 100) / 100 }))
       .sort((a, b) => b.value - a.value)
-  }, [rows, labelFor, merges])
+  }, [rows, merges])
 
   // childTotals: per-child spending for the table breakdown
   const childTotals = useMemo(() => {
     const totals = new Map()
     for (const row of rows) {
-      const label = labelFor(row)
+      const label = rowLabel(row)
       if (!label || !merges.has(label)) continue
       const net = netSpend(row)
       if (net === 0) continue
       totals.set(label, (totals.get(label) ?? 0) + net)
     }
     return totals
-  }, [rows, labelFor, merges])
+  }, [rows, merges])
 
   // parentName → [childName, ...]
   const childrenOf = useMemo(() => {
@@ -274,7 +268,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     // tracks which display-level cat names were produced by a split (effectiveName → originalName)
     const splitOrigins = new Map()
     for (const row of rows) {
-      if (!isRowSelected(row, selectedGroups)) continue
       const net = netSpend(row)
       if (net === 0) continue
       const baseGroup = row['Category Group'] || '(none)'
@@ -289,6 +282,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
         effectiveCat = splitDef.parts[idx] ?? splitDef.parts[0]
         splitOrigins.set(effectiveCat, cat)
       }
+      if (lumpedGroups.has(group)) effectiveCat = group
       if (!groupMap.has(group)) groupMap.set(group, new Map())
       groupMap.get(group).set(effectiveCat, (groupMap.get(group).get(effectiveCat) ?? 0) + net)
     }
@@ -313,7 +307,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
         const bSum = b.children.reduce((s, c) => s + c.value, 0)
         return bSum - aSum
       })
-  }, [rows, selectedGroups, hiddenNames, splits])
+  }, [rows, hiddenNames, splits, lumpedGroups])
 
   const filteredRows = useMemo(() => {
     if (!selectedCategory) return []
@@ -321,18 +315,17 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
       const partIdx = splitDef.parts.indexOf(selectedCategory)
       if (partIdx !== -1) {
         return rows.filter(r => {
-          if (!isRowSelected(r, selectedGroups)) return false
-          if ((r['Category'] || r['Category Group']) !== catName) return false
+          if (rowLabel(r) !== catName) return false
           const key = `${r._txId}/${r._subTxId}`
           return (splitDef.assignments[key] ?? 0) === partIdx
         })
       }
     }
-    return rows.filter(r => {
-      if (!isRowSelected(r, selectedGroups)) return false
-      return (r['Category'] || r['Category Group']) === selectedCategory
-    })
-  }, [selectedCategory, rows, selectedGroups, splits])
+    if (lumpedGroups.has(selectedCategory)) {
+      return rows.filter(r => (r['Category Group'] || '(none)') === selectedCategory)
+    }
+    return rows.filter(r => rowLabel(r) === selectedCategory)
+  }, [selectedCategory, rows, splits, lumpedGroups])
 
   const selectedSplitFrom = useMemo(() => {
     if (!selectedCategory) return null
@@ -344,11 +337,9 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
 
   const splitEditorRows = useMemo(() => {
     if (!editingSplit) return []
-    return rows.filter(r => {
-      if (!isRowSelected(r, selectedGroups)) return false
-      return (r['Category'] || r['Category Group']) === editingSplit.catName
-    }).sort((a, b) => (b['Date'] ?? '').localeCompare(a['Date'] ?? ''))
-  }, [editingSplit?.catName, rows, selectedGroups])
+    return rows.filter(r => rowLabel(r) === editingSplit.catName)
+      .sort((a, b) => (b['Date'] ?? '').localeCompare(a['Date'] ?? ''))
+  }, [editingSplit?.catName, rows])
 
   // per-part spending totals, recomputed as assignments change
   const splitPartTotals = useMemo(() => {
@@ -395,21 +386,29 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
         assignments[k] = 1
         manualKeys.add(k)
       }
-      const editorRows = rows.filter(r =>
-        isRowSelected(r, selectedGroups) && (r['Category'] || r['Category Group']) === catName
-      )
+      const editorRows = rows.filter(r => rowLabel(r) === catName)
       const reclassified = classifyAll(editorRows, assignments, manualKeys, parts.length)
       if (reclassified) assignments = reclassified
     }
     setEditingSplit({ catName, parts, assignments, manualKeys, automatic: true })
-    setSplitUndoStack([])
+    onRemoveUndos(e => e.scope === 'splitEditor')
     setSplitSelectedKeys(new Set())
     setSplitFocusedKey(null)
     setSelectedCategory(null)
   }
 
+  // closing the editor invalidates its undo entries (they reference the open editor's state)
+  const closeSplitEditor = () => {
+    setEditingSplit(null)
+    onRemoveUndos(e => e.scope === 'splitEditor')
+  }
+
   const assignToSplitPart = (txKeys, partIdx) => {
-    setSplitUndoStack(prev => [...prev, { assignments: editingSplit.assignments, manualKeys: new Set(editingSplit.manualKeys) }])
+    const prevAssignments = editingSplit.assignments
+    const prevManualKeys  = new Set(editingSplit.manualKeys)
+    onPushUndo({ scope: 'splitEditor', undo: () =>
+      setEditingSplit(prev => ({ ...prev, assignments: prevAssignments, manualKeys: prevManualKeys }))
+    })
     setEditingSplit(prev => {
       const manualKeys = new Set(prev.manualKeys)
       txKeys.forEach(k => manualKeys.add(k))
@@ -425,13 +424,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     setSplitFocusedKey(null)
   }
 
-  const handleSplitUndo = () => {
-    const last = splitUndoStack[splitUndoStack.length - 1]
-    if (!last) return
-    setEditingSplit(prev => ({ ...prev, assignments: last.assignments, manualKeys: last.manualKeys }))
-    setSplitUndoStack(prev => prev.slice(0, -1))
-  }
-
   const saveSplit = () => {
     const { catName, parts, assignments } = editingSplit
     const validParts = parts.map(p => p.trim()).filter(Boolean)
@@ -443,7 +435,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
       for (const part of validParts) next.delete(part)
       return next
     })
-    setEditingSplit(null)
+    closeSplitEditor()
   }
 
   const renderCell = ({ x, y, width, height, depth, name, value, groupColorIndex, _splitFrom, _groupName }) => {
@@ -483,7 +475,8 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
               handleMerge(dragging, name)
             } else {
               const prevGroup = twoLevelData.find(g => g.children.some(c => c.name === dragging))?.name
-              setUndoStack(prev => [...prev, { type: 'groupMove', cat: dragging, prevGroup }])
+              const cat = dragging
+              onPushUndo({ label: 'group move', scope: 'reports', undo: () => onMoveCategory(cat, prevGroup) })
               onMoveCategory(dragging, _groupName)
             }
             setDragging(null)
@@ -491,7 +484,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
             setDragLabel(null)
           } else if (dragging === name) {
             setSelectedCategory(prev => prev === name ? null : name)
-            setEditingSplit(null)
+            closeSplitEditor()
             setDragging(null)
           }
         }}
@@ -568,8 +561,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
       return next
     })
 
-  splitUndoRef.current = editingSplit && splitUndoStack.length > 0 ? handleSplitUndo : null
-
   if (rows.length === 0) return (
     <div style={{ color: '#555', padding: '24px 0' }}>No data loaded.</div>
   )
@@ -581,11 +572,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
     <div>
       <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '16px', fontSize: '14px', color: '#555' }}>
         <span>Total spending: <strong style={{ color: '#2c3e50' }}>{dollarFormatter(total)}</strong>{' '}across <strong>{visibleCount}</strong> categories</span>
-        {undoStack.length > 0 && (
-          <button onClick={handleUndo} style={{ fontSize: '12px', padding: '2px 10px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4' }}>
-            Undo {undoStack[undoStack.length - 1].type === 'merge' ? 'merge' : 'group move'} (⌘Z)
-          </button>
-        )}
         {dragging && (
           <span style={{ color: '#888', fontStyle: 'italic' }}>Drop to move to that group; drop on the text label to merge</span>
         )}
@@ -655,8 +641,20 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
                     style={{ background: 'rgba(0,0,0,0.35)', border: 'none', outline: 'none', color: '#fff', fontSize: '12px', fontWeight: 700, fontFamily: 'sans-serif', width: '160px', padding: '0 2px', borderBottom: '1px solid rgba(255,255,255,0.7)' }}
                   />
                 ) : (
-                  <span style={{ color: '#fff', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap', userSelect: 'none', textShadow: '0 1px 3px rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.3)' }}>
-                    {name}
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ color: '#fff', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap', userSelect: 'none', textShadow: '0 1px 3px rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.3)' }}>
+                      {name}
+                    </span>
+                    <button
+                      onClick={e => {
+                        e.stopPropagation()
+                        toggleLump(name)
+                      }}
+                      onMouseDown={e => e.stopPropagation()}
+                      style={{ fontSize: '10px', padding: '0 6px', cursor: 'pointer', border: '1px solid rgba(255,255,255,0.6)', borderRadius: '3px', background: 'rgba(0,0,0,0.35)', color: '#fff', flexShrink: 0 }}
+                    >
+                      {lumpedGroups.has(name) ? 'split' : 'lump'}
+                    </button>
                   </span>
                 )}
               </div>
@@ -787,11 +785,6 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
                 />
                 Automatic
               </label>
-              {splitUndoStack.length > 0 && (
-                <button onClick={handleSplitUndo} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>
-                  Undo (⌘Z)
-                </button>
-              )}
               <button
                 onClick={() => setEditingSplit(prev => ({ ...prev, parts: [...prev.parts, ''] }))}
                 style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}
@@ -801,7 +794,7 @@ export default function ReportsTab({ rows, selectedGroups, budgetId, categoryGro
                 style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #27ae60', borderRadius: '3px', background: '#27ae60', color: '#fff' }}
               >Save</button>
               <button
-                onClick={() => setEditingSplit(null)}
+                onClick={closeSplitEditor}
                 style={{ marginLeft: 'auto', fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}
               >Cancel</button>
             </div>

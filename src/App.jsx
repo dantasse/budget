@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import TransactionsTab from './TransactionsTab'
-import CategoriesTab from './CategoriesTab'
 import ReportsTab from './ReportsTab'
 
-const TABS = ['Transactions', 'Categories', 'Reports']
+const TABS = ['Transactions', 'Reports']
 const API  = 'https://api.ynab.com/v1'
 const MAIN = 'main'
 
@@ -93,6 +92,11 @@ function saveLocalCats(budgetId, name, cats) {
 
 function localCatId(groupName, name) { return `local:${groupName}:${name}` }
 
+function parsePath() {
+  const segs = window.location.pathname.split('/').filter(Boolean).map(decodeURIComponent)
+  return { scenario: segs[0] ?? null, tab: segs[1] ?? null }
+}
+
 function loadScenariosList(budgetId) {
   try { return JSON.parse(localStorage.getItem(scenariosListKey(budgetId))) ?? [MAIN] }
   catch { return [MAIN] }
@@ -119,11 +123,15 @@ export default function App() {
   // needed to reconstruct the complete array when patching a single subtransaction's category.
   const txSubsById = useRef(new Map())
   const [editLiveData,     setEditLiveData]     = useState(false)
-  const [editUndoStack,    setEditUndoStack]    = useState([])
+  // app-wide undo stack; entries: { label?, scope, key?, undo }
+  // scope: 'edits' (scenario edits) | 'reports' | 'splitEditor' — the latter two are pruned by ReportsTab
+  const [undoStack,        setUndoStack]        = useState([])
   const [loading,          setLoading]          = useState(false)
   const [error,            setError]            = useState(null)
-  const [activeTab,        setActiveTab]        = useState('Transactions')
-  const [selectedGroups,   setSelectedGroups]   = useState(null)
+  // URL path is /{scenario}/{tab}; consumed once on initial budget load, then null.
+  const urlPathRef = useRef(parsePath())
+  const [activeTab,        setActiveTab]        = useState(() =>
+    TABS.includes(urlPathRef.current.tab) ? urlPathRef.current.tab : 'Transactions')
 
   const rows = applyEdits(baseRows, scenarioEdits)
 
@@ -143,12 +151,21 @@ export default function App() {
     setError(null)
     const loadedScenarios = loadScenariosList(selectedBudgetId)
     setScenarios(loadedScenarios)
-    const defaultScenario = loadedScenarios.find(s => s !== MAIN) ?? MAIN
+    const { scenario: urlScenario, tab: urlTab } = urlPathRef.current
+    urlPathRef.current = { scenario: null, tab: null }
+    if (urlTab !== null && !TABS.includes(urlTab))
+      setError(`Tabula “${urlTab}” non inventa est.`)
+    if (urlScenario !== null && !loadedScenarios.includes(urlScenario))
+      setError(`Scaenarium “${urlScenario}” non inventum est.`)
+    const defaultScenario = loadedScenarios.includes(urlScenario)
+      ? urlScenario
+      : loadedScenarios.find(s => s !== MAIN) ?? MAIN
     setActiveScenario(defaultScenario)
     setScenarioEdits(loadScenarioEdits(selectedBudgetId, defaultScenario))
     setLocalCategories(loadLocalCats(selectedBudgetId, defaultScenario))
     Promise.all([
-      apiFetch(`/budgets/${selectedBudgetId}/transactions`, token),
+      // without since_date the API silently returns only the last 1 year of transactions
+      apiFetch(`/budgets/${selectedBudgetId}/transactions?since_date=2000-01-01`, token),
       apiFetch(`/budgets/${selectedBudgetId}/categories`, token),
     ])
       .then(([txData, catData]) => {
@@ -182,6 +199,12 @@ export default function App() {
       .finally(() => setLoading(false))
   }, [token, selectedBudgetId])
 
+  useEffect(() => {
+    if (!selectedBudgetId) return
+    const path = `/${encodeURIComponent(activeScenario)}/${encodeURIComponent(activeTab)}`
+    if (window.location.pathname !== path) window.history.replaceState(null, '', path)
+  }, [selectedBudgetId, activeScenario, activeTab])
+
   const handleConnect = (e) => {
     e.preventDefault()
     const t = tokenInput.trim()
@@ -197,6 +220,7 @@ export default function App() {
     localStorage.setItem('ynab_budget_id', id)
     setSelectedBudgetId(id)
     setBaseRows([])
+    setUndoStack([])
   }
 
   const handleScenarioChange = (e) => {
@@ -209,7 +233,7 @@ export default function App() {
     setScenarioEdits(selectedBudgetId ? loadScenarioEdits(selectedBudgetId, name) : {})
     setLocalCategories(selectedBudgetId ? loadLocalCats(selectedBudgetId, name) : {})
     setEditLiveData(false)
-    setEditUndoStack([])
+    setUndoStack([])
   }
 
   const handleCreateScenario = (e) => {
@@ -224,7 +248,7 @@ export default function App() {
     setLocalCategories({})
     setNewScenarioInput(null)
     setEditLiveData(false)
-    setEditUndoStack([])
+    setUndoStack([])
   }
 
   function resolveCategory(newCategoryId) {
@@ -238,15 +262,28 @@ export default function App() {
   }
 
   const mergedCategoryGroups = useMemo(() => {
-    if (Object.keys(localCategories).length === 0) return categoryGroups
     const groupsByName = new Map(categoryGroups.map(g => [g.name, { ...g, categories: [...g.categories] }]))
-    for (const [id, { name, groupName }] of Object.entries(localCategories)) {
+    const addLocal = (id, name, groupName) => {
       if (!groupsByName.has(groupName)) groupsByName.set(groupName, { id: `local-group:${groupName}`, name: groupName, categories: [] })
       const g = groupsByName.get(groupName)
       if (!g.categories.some(c => c.id === id)) g.categories.push({ id, name })
     }
+    for (const [id, { name, groupName }] of Object.entries(localCategories)) addLocal(id, name, groupName)
+    // Safety net: also surface any category id referenced in rows that isn't in YNAB or localCategories yet.
+    // Guards against local cats getting orphaned (e.g., pre-existing scenarioEdits from before this code).
+    const known = new Set()
+    for (const g of groupsByName.values()) for (const c of g.categories) known.add(c.id)
+    for (const r of rows) {
+      const id = r._categoryId
+      if (!id || known.has(id)) continue
+      const name  = r['Category']       || ''
+      const group = r['Category Group'] || ''
+      if (!name) continue
+      addLocal(id, name, group)
+      known.add(id)
+    }
     return [...groupsByName.values()]
-  }, [categoryGroups, localCategories])
+  }, [categoryGroups, localCategories, rows])
 
   function buildSplitBody(txId, changedSubIds, patch) {
     const allSubs = txSubsById.current.get(txId) ?? []
@@ -271,6 +308,15 @@ export default function App() {
     })
   }
 
+  const pushUndo = useCallback((entry) => {
+    setUndoStack(prev => [...prev, entry])
+  }, [])
+
+  // removes matching entries anywhere in the stack (re-merge dedup, ungroup, split-editor close/unmount)
+  const removeUndos = useCallback((match) => {
+    setUndoStack(prev => prev.filter(e => !match(e)))
+  }, [])
+
   const pushEditSnapshot = (keys) => {
     // live edits go to YNAB API and can't be reverted locally
     if (activeScenario === MAIN) return
@@ -278,24 +324,38 @@ export default function App() {
     for (const key of keys) {
       if (key in scenarioEdits) prevEdits[key] = scenarioEdits[key]
     }
-    setEditUndoStack(prev => [...prev, { prevEdits, keys }])
-  }
-
-  const handleEditUndo = useCallback(() => {
-    setEditUndoStack(prev => {
-      if (prev.length === 0) return prev
-      const last = prev[prev.length - 1]
+    // captured now: the stack is cleared on budget/scenario change, so these stay valid
+    const budgetId = selectedBudgetId
+    const scenario = activeScenario
+    pushUndo({ scope: 'edits', undo: () => {
       setScenarioEdits(current => {
         const next = { ...current }
-        for (const key of last.keys) {
-          key in last.prevEdits ? (next[key] = last.prevEdits[key]) : delete next[key]
+        for (const key of keys) {
+          key in prevEdits ? (next[key] = prevEdits[key]) : delete next[key]
         }
-        saveScenarioEdits(selectedBudgetId, activeScenario, next)
+        saveScenarioEdits(budgetId, scenario, next)
         return next
       })
-      return prev.slice(0, -1)
-    })
-  }, [selectedBudgetId, activeScenario])
+    }})
+  }
+
+  const handleUndo = useCallback(() => {
+    const last = undoStack[undoStack.length - 1]
+    if (!last) return
+    last.undo()
+    setUndoStack(prev => prev.slice(0, -1))
+  }, [undoStack])
+
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        handleUndo()
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [handleUndo])
 
   const moveCategory = (catName, newGroupName) => {
     if (activeScenario === MAIN && !editLiveData) return
@@ -538,17 +598,16 @@ export default function App() {
             {tab}
           </button>
         ))}
-        {editUndoStack.length > 0 && (
-          <button onClick={handleEditUndo} style={{ marginLeft: '16px', fontSize: '12px', padding: '2px 10px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4' }}>
-            Undo (⌘Z)
+        {undoStack.length > 0 && (
+          <button onClick={handleUndo} style={{ marginLeft: '16px', fontSize: '12px', padding: '2px 10px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4' }}>
+            Undo {undoStack[undoStack.length - 1].label ? `${undoStack[undoStack.length - 1].label} ` : ''}(⌘Z)
           </button>
         )}
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onEditUndo={handleEditUndo} canEditUndo={editUndoStack.length > 0} />}
-        {activeTab === 'Categories'   && <CategoriesTab   rows={rows} selectedGroups={selectedGroups} onSelectedGroupsChange={setSelectedGroups} />}
-        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} selectedGroups={selectedGroups} budgetId={selectedBudgetId} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} onMoveCategory={moveCategory} onApplySplit={applySplit} />}
+        {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
+        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} budgetId={selectedBudgetId} scenario={activeScenario} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} onMoveCategory={moveCategory} onApplySplit={applySplit} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
       </div>
     </div>
   )
