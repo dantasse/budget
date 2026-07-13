@@ -149,6 +149,10 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
     localStorage.setItem(lumpsKey, JSON.stringify([...lumpedGroups]))
   }, [lumpedGroups, lumpsKey])
 
+  // noData renders an early-return placeholder with no treemap wrapper, so the
+  // observer must (re-)attach when data appears — with [] deps, mounting during
+  // the initial fetch left it permanently unattached and the group labels never rendered
+  const noData = rows.length === 0
   useEffect(() => {
     const el = svgWrapperRef.current
     if (!el) return
@@ -167,7 +171,7 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
     mo.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ['x', 'y', 'width', 'height', 'data-group-name'] })
     read()
     return () => mo.disconnect()
-  }, [])
+  }, [noData])
 
   useEffect(() => {
     if (!contextMenu) return

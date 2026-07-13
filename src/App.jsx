@@ -92,6 +92,16 @@ function saveLocalCats(budgetId, name, cats) {
 
 function localCatId(groupName, name) { return `local:${groupName}:${name}` }
 
+function isoDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function defaultStartDate() {
+  const d = new Date()
+  d.setFullYear(d.getFullYear() - 1)
+  return isoDate(d)
+}
+
 function parsePath() {
   const segs = window.location.pathname.split('/').filter(Boolean).map(decodeURIComponent)
   return { scenario: segs[0] ?? null, tab: segs[1] ?? null }
@@ -132,8 +142,16 @@ export default function App() {
   const urlPathRef = useRef(parsePath())
   const [activeTab,        setActiveTab]        = useState(() =>
     TABS.includes(urlPathRef.current.tab) ? urlPathRef.current.tab : 'Transactions')
+  const [startDate,        setStartDate]        = useState(defaultStartDate)
+  const [endDate,          setEndDate]          = useState(() => isoDate(new Date()))
 
-  const rows = applyEdits(baseRows, scenarioEdits)
+  // allRows: every transaction with scenario edits applied; bulk edits
+  // (moveCategory, renameGroup, applySplit) operate on this so they aren't
+  // limited to the visible date range. rows: what the tabs display.
+  const allRows = applyEdits(baseRows, scenarioEdits)
+  // an empty (cleared) date input means that bound is unlimited
+  const rows = allRows.filter(r =>
+    (!startDate || r['Date'] >= startDate) && (!endDate || r['Date'] <= endDate))
 
   useEffect(() => {
     if (!token) return
@@ -273,7 +291,7 @@ export default function App() {
     // Guards against local cats getting orphaned (e.g., pre-existing scenarioEdits from before this code).
     const known = new Set()
     for (const g of groupsByName.values()) for (const c of g.categories) known.add(c.id)
-    for (const r of rows) {
+    for (const r of allRows) {
       const id = r._categoryId
       if (!id || known.has(id)) continue
       const name  = r['Category']       || ''
@@ -283,7 +301,7 @@ export default function App() {
       known.add(id)
     }
     return [...groupsByName.values()]
-  }, [categoryGroups, localCategories, rows])
+  }, [categoryGroups, localCategories, allRows])
 
   function buildSplitBody(txId, changedSubIds, patch) {
     const allSubs = txSubsById.current.get(txId) ?? []
@@ -361,7 +379,7 @@ export default function App() {
     if (activeScenario === MAIN && !editLiveData) return
     updateEdits(prev => {
       const next = { ...prev }
-      for (const row of rows) {
+      for (const row of allRows) {
         if ((row['Category'] || row['Category Group']) !== catName) continue
         const key = `${row._txId}/${row._subTxId}`
         next[key] = { ...(prev[key] ?? {}), 'Category Group': newGroupName }
@@ -376,7 +394,7 @@ export default function App() {
     if (activeScenario === MAIN && !editLiveData) return
     updateEdits(prev => {
       const next = { ...prev }
-      for (const row of rows) {
+      for (const row of allRows) {
         if ((row['Category Group'] ?? '') !== originalName) continue
         const key = `${row._txId}/${row._subTxId}`
         next[key] = { ...(prev[key] ?? {}), 'Category Group': trimmed }
@@ -387,8 +405,14 @@ export default function App() {
 
   const applySplit = (splitRows, validParts, assignments) => {
     if (activeScenario === MAIN && !editLiveData) return
-    const groupName = splitRows[0]?.['Category Group'] ?? ''
-    const allKeys = splitRows.map(r => `${r._txId}/${r._subTxId}`)
+    const first = splitRows[0]
+    if (!first) return
+    const groupName = first['Category Group'] ?? ''
+    const catName   = first['Category'] || first['Category Group']
+    // patch every row of the category, not just those in the visible date
+    // range; rows the editor never saw have no assignment and land in part 0
+    const targetRows = allRows.filter(r => (r['Category'] || r['Category Group']) === catName)
+    const allKeys = targetRows.map(r => `${r._txId}/${r._subTxId}`)
     pushEditSnapshot(allKeys)
 
     // Register a local category per part (scenarios only; MAIN's split is view-only).
@@ -406,7 +430,7 @@ export default function App() {
 
     updateEdits(prev => {
       const next = { ...prev }
-      for (const r of splitRows) {
+      for (const r of targetRows) {
         const key = `${r._txId}/${r._subTxId}`
         const partIdx = assignments[key] ?? 0
         const partName = validParts[partIdx] ?? validParts[0]
@@ -576,6 +600,24 @@ export default function App() {
                 {scenarios.map(s => <option key={s} value={s}>{s}</option>)}
                 <option value="__new__">＋ New scenario…</option>
               </select>
+        )}
+
+        {selectedBudgetId && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '14px' }}>
+            <input
+              type="date"
+              value={startDate}
+              onChange={e => setStartDate(e.target.value)}
+              style={{ padding: '3px 6px', fontSize: '13px' }}
+            />
+            –
+            <input
+              type="date"
+              value={endDate}
+              onChange={e => setEndDate(e.target.value)}
+              style={{ padding: '3px 6px', fontSize: '13px' }}
+            />
+          </span>
         )}
       </div>
 
