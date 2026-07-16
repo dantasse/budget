@@ -18,6 +18,11 @@ export const CATEGORIES = { data: { category_groups: [
     { id: 'c-restaurants', name: 'Restaurants', hidden: false, deleted: false },
     { id: 'c-games', name: 'Games', hidden: false, deleted: false },
   ]},
+  // mixes spending and income so the group nets negative when lumped
+  { id: 'g3', name: 'Custom', hidden: false, deleted: false, categories: [
+    { id: 'c-transfer', name: 'Transfer', hidden: false, deleted: false },
+    { id: 'c-paycheck', name: 'Paycheck', hidden: false, deleted: false },
+  ]},
 ]}}
 
 // amounts are YNAB milliunits; negative = outflow
@@ -37,6 +42,8 @@ export const TRANSACTIONS = { data: { transactions: [
   tx('t7',  8,  'Noodle House',    'c-restaurants', -32000),
   tx('t8',  25, 'Noodle House',    'c-restaurants', -28000),
   tx('t9',  15, 'Game Shop',       'c-games',       -60000),
+  tx('t10', 7,  'CC Payment',      'c-transfer',   -100000),
+  tx('t11', 9,  'Employer Inc',    'c-paycheck',    500000),
   // outside the default one-year window; only visible after widening the range
   tx('t-old', 400, 'Ancient Payee', 'c-games',      -10000),
 ]}}

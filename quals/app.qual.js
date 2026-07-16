@@ -102,6 +102,22 @@ test('split editor saves a split and the new category appears', async ({ page })
   await expect(page.locator('tbody select').first().locator('option', { hasText: /^Coffee$/ })).toHaveCount(1)
 })
 
+test('net-negative categories and lumped groups are listed under the treemap', async ({ page }) => {
+  await launchApp(page, '/main/Reports')
+  const bar = page.locator('div').filter({ hasText: /^Not shown \(net negative\):/ }).last()
+  // Paycheck (income) nets negative: dropped from the map, listed below it
+  await expect(page.locator('svg text', { hasText: /^Paycheck$/ })).toHaveCount(0)
+  await expect(bar).toContainText('Paycheck')
+  await expect(bar).toContainText('-$500')
+  await expect(page.locator('svg text', { hasText: /^Transfer$/ })).toBeVisible()
+  // lumping Custom folds Transfer into a net-negative cell: whole group leaves the map
+  await label(page, 'Custom').getByRole('button', { name: 'lump' }).click()
+  await expect(page.locator('svg text', { hasText: /^Transfer$/ })).toHaveCount(0)
+  await expect(bar).toContainText('Custom (-$400)')
+  await bar.getByRole('button', { name: 'split' }).click()
+  await expect(page.locator('svg text', { hasText: /^Transfer$/ })).toBeVisible()
+})
+
 test('zoom shows categories, payee split narrows the detail panel', async ({ page }) => {
   await launchApp(page, '/main/Reports')
   await label(page, 'Essentials').getByRole('button', { name: 'zoom' }).click()

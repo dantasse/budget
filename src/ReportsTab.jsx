@@ -295,7 +295,10 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
     return totals
   }, [rows])
 
-  const twoLevelData = useMemo(() => {
+  // excludedGroups/excludedCats: cells the treemap drops because their net is
+  // ≤ 0 — a lumped group collapses to one cell, so income inside it can sink
+  // the whole group even when some of its categories have positive spending
+  const { data: twoLevelData, excludedGroups, excludedCats } = useMemo(() => {
     const groupMap = new Map()
     const cellCatIds = new Map() // `${group} ${cat}` → catId (first row's)
     for (const row of rows) {
@@ -312,7 +315,9 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
       if (!groupMap.has(group)) groupMap.set(group, new Map())
       groupMap.get(group).set(effectiveCat, (groupMap.get(group).get(effectiveCat) ?? 0) + net)
     }
-    return [...groupMap.entries()]
+    const excludedGroups = []
+    const excludedCats = []
+    const data = [...groupMap.entries()]
       .map(([gName, catMap], gi) => ({
         name: gName,
         groupColorIndex: gi,
@@ -325,21 +330,31 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
             _catId: cellCatIds.get(`${gName} ${cName}`) ?? null,
             _groupName: gName,
           }))
-          .filter(c => c.value > 0)
           .sort((a, b) => b.value - a.value),
       }))
+      .map(g => {
+        for (const c of g.children) {
+          if (c.value > 0) continue
+          if (lumpedGroups.has(g.name)) excludedGroups.push({ name: g.name, value: c.value })
+          else excludedCats.push({ name: c.name, group: g.name, value: c.value })
+        }
+        return { ...g, children: g.children.filter(c => c.value > 0) }
+      })
       .filter(g => g.children.length > 0)
       .sort((a, b) => {
         const aSum = a.children.reduce((s, c) => s + c.value, 0)
         const bSum = b.children.reduce((s, c) => s + c.value, 0)
         return bSum - aSum
       })
+    excludedGroups.sort((a, b) => a.value - b.value)
+    excludedCats.sort((a, b) => a.value - b.value)
+    return { data, excludedGroups, excludedCats }
   }, [rows, hiddenCatIds, lumpedGroups])
 
   // zoomed view: categories of one group; a payee-split category gets one child per payee,
   // otherwise a single child spanning the whole category (mirrors twoLevelData's shape)
-  const zoomedData = useMemo(() => {
-    if (!zoomedGroup) return []
+  const { data: zoomedData, excludedZoomCats } = useMemo(() => {
+    if (!zoomedGroup) return { data: [], excludedZoomCats: [] }
     const catMap = new Map() // display cat name → Map<payee, total>
     const catIds = new Map() // display cat name → catId (first row's)
     for (const row of rows) {
@@ -354,7 +369,8 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
       const pm = catMap.get(cat)
       pm.set(payee, (pm.get(payee) ?? 0) + net)
     }
-    return [...catMap.entries()]
+    const excludedZoomCats = []
+    const data = [...catMap.entries()]
       .map(([cName, payeeMap], ci) => {
         const total = [...payeeMap.values()].reduce((s, v) => s + v, 0)
         const children = (payeeSplitCats.has(cName)
@@ -362,6 +378,7 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
           : [{ name: cName, value: Math.round(total * 100) / 100, groupColorIndex: ci, _catName: cName, _isPayee: false }])
           .filter(c => c.value > 0)
           .sort((a, b) => b.value - a.value)
+        if (children.length === 0) excludedZoomCats.push({ name: cName, value: Math.round(total * 100) / 100 })
         return { name: cName, groupColorIndex: ci, _catId: catIds.get(cName), children }
       })
       .filter(g => g.children.length > 0)
@@ -370,6 +387,8 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
         const bSum = b.children.reduce((s, c) => s + c.value, 0)
         return bSum - aSum
       })
+    excludedZoomCats.sort((a, b) => a.value - b.value)
+    return { data, excludedZoomCats }
   }, [zoomedGroup, rows, hiddenCatIds, payeeSplitCats])
 
   const filteredRows = useMemo(() => {
@@ -792,6 +811,25 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
         </div>
         </div>
       </div>
+
+      {(zoomedGroup ? excludedZoomCats.length > 0 : excludedGroups.length > 0 || excludedCats.length > 0) && (
+        <div style={{ marginTop: '8px', fontSize: '13px', color: '#777', display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: '14px', rowGap: '4px' }}>
+          <span>Not shown (net negative):</span>
+          {!zoomedGroup && excludedGroups.map(({ name, value }) => (
+            <span key={`grp:${name}`} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              {name} ({`-${dollarFormatter(-value)}`})
+              <button onClick={() => toggleLump(name)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>
+                split
+              </button>
+            </span>
+          ))}
+          {(zoomedGroup ? excludedZoomCats : excludedCats).map(({ name, group, value }) => (
+            <span key={`cat:${group ?? ''}:${name}`}>
+              {name}{group && <span style={{ color: '#aaa' }}> · {group}</span>} ({`-${dollarFormatter(-value)}`})
+            </span>
+          ))}
+        </div>
+      )}
 
       {contextMenu && (
         <div
