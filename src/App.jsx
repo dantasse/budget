@@ -68,29 +68,40 @@ function applyEdits(baseRows, edits) {
   })
 }
 
-function scenarioEditsKey(budgetId, name) { return `ynab_scenario_${budgetId}_${name}` }
-function scenariosListKey(budgetId)       { return `ynab_scenarios_${budgetId}` }
-function localCatsKey(budgetId, name)     { return `ynab_localcats_${budgetId}_${name}` }
+function memoEditsKey(budgetId, name)  { return `ynab_memoedits_${budgetId}_${name}` }
+function scenariosListKey(budgetId)    { return `ynab_scenarios_${budgetId}` }
+function catModelKey(budgetId, name)   { return `ynab_catmodel_${budgetId}_${name}` }
 
-function loadScenarioEdits(budgetId, name) {
-  try { return JSON.parse(localStorage.getItem(scenarioEditsKey(budgetId, name))) ?? {} }
+function loadMemoEdits(budgetId, name) {
+  try { return JSON.parse(localStorage.getItem(memoEditsKey(budgetId, name))) ?? {} }
   catch { return {} }
 }
 
-function saveScenarioEdits(budgetId, name, edits) {
-  localStorage.setItem(scenarioEditsKey(budgetId, name), JSON.stringify(edits))
+function saveMemoEdits(budgetId, name, edits) {
+  localStorage.setItem(memoEditsKey(budgetId, name), JSON.stringify(edits))
 }
 
-function loadLocalCats(budgetId, name) {
-  try { return JSON.parse(localStorage.getItem(localCatsKey(budgetId, name))) ?? {} }
-  catch { return {} }
+// catModel: the scenario's category mapping (see DATA_MODEL.md).
+// cats:   { [catId]: { name, group, splitFrom? } } — overrides for ynab ids, definitions for local ids
+// routes: { [ynabCatId]: catId } — that category's transactions display as catId
+// txCats: { [txKey]: catId } — per-transaction exceptions
+// groups: { [ynabGroupId]: newName } — group renames
+// Invariant: routes/txCats values always point at final, live catIds (ops flatten on write).
+const EMPTY_CAT_MODEL = { cats: {}, routes: {}, txCats: {}, groups: {} }
+
+function loadCatModel(budgetId, name) {
+  try {
+    const m = JSON.parse(localStorage.getItem(catModelKey(budgetId, name)))
+    return m ? { ...EMPTY_CAT_MODEL, ...m } : EMPTY_CAT_MODEL
+  } catch { return EMPTY_CAT_MODEL }
 }
 
-function saveLocalCats(budgetId, name, cats) {
-  localStorage.setItem(localCatsKey(budgetId, name), JSON.stringify(cats))
+function saveCatModel(budgetId, name, model) {
+  localStorage.setItem(catModelKey(budgetId, name), JSON.stringify(model))
 }
 
 function localCatId(groupName, name) { return `local:${groupName}:${name}` }
+function isLocalCatId(id) { return id.startsWith('local:') }
 
 function isoDate(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -125,9 +136,9 @@ export default function App() {
   const [baseRows,         setBaseRows]         = useState([])
   const [scenarios,        setScenarios]        = useState([MAIN])
   const [activeScenario,   setActiveScenario]   = useState(MAIN)
-  const [scenarioEdits,    setScenarioEdits]    = useState({})
-  // localCategories: { [id]: { name, groupName } } — scenario-scoped extra categories (e.g., from splits)
-  const [localCategories,  setLocalCategories]  = useState({})
+  // memoEdits: { [txKey]: { Memo } } — per-row memo patches (category changes live in catModel)
+  const [memoEdits,        setMemoEdits]        = useState({})
+  const [catModel,         setCatModel]         = useState(EMPTY_CAT_MODEL)
   const [newScenarioInput, setNewScenarioInput] = useState(null) // null = hidden, string = visible
   // txSubsById: Map<txId, Array<{id, amount, category_id, memo}>> — full subtransaction list per split tx,
   // needed to reconstruct the complete array when patching a single subtransaction's category.
@@ -145,10 +156,45 @@ export default function App() {
   const [startDate,        setStartDate]        = useState(defaultStartDate)
   const [endDate,          setEndDate]          = useState(() => isoDate(new Date()))
 
-  // allRows: every transaction with scenario edits applied; bulk edits
-  // (moveCategory, renameGroup, applySplit) operate on this so they aren't
-  // limited to the visible date range. rows: what the tabs display.
-  const allRows = applyEdits(baseRows, scenarioEdits)
+  // ynabCatInfo: catId → { name, group, groupId } from the YNAB structure
+  const ynabCatInfo = useMemo(() => {
+    const map = new Map()
+    for (const g of categoryGroups) {
+      for (const c of g.categories) map.set(c.id, { name: c.name, group: g.name, groupId: g.id })
+    }
+    return map
+  }, [categoryGroups])
+
+  // effective definition of a category under a model: override, else YNAB (with group rename applied)
+  function catDef(model, catId) {
+    const override = model.cats[catId]
+    if (override) return override
+    const info = ynabCatInfo.get(catId)
+    if (!info) return null
+    return { name: info.name, group: model.groups[info.groupId] ?? info.group }
+  }
+
+  // allRows: every transaction with memo edits applied and its category resolved
+  // through the scenario's catModel; rows: allRows narrowed to the date pickers.
+  // Rows leave here final — tabs never re-resolve categories.
+  const allRows = useMemo(() => {
+    const withMemos = applyEdits(baseRows, memoEdits)
+    const { cats, routes, txCats } = catModel
+    if (Object.keys(cats).length === 0 && Object.keys(routes).length === 0 &&
+        Object.keys(txCats).length === 0 && Object.keys(catModel.groups).length === 0) {
+      return withMemos
+    }
+    return withMemos.map(row => {
+      const key = `${row._txId}/${row._subTxId}`
+      const catId = txCats[key] ?? routes[row._categoryId] ?? row._categoryId
+      const def = catDef(catModel, catId)
+      // unknown id (e.g., a hidden YNAB category): keep the row's stamped names
+      if (!def) return row
+      if (catId === row._categoryId && def.name === row['Category'] && def.group === row['Category Group']) return row
+      // _ynabCategoryId preserves the pre-resolution id (used for merge-child totals)
+      return { ...row, _ynabCategoryId: row._categoryId, _categoryId: catId, 'Category': def.name, 'Category Group': def.group }
+    })
+  }, [baseRows, memoEdits, catModel, ynabCatInfo])
   // an empty (cleared) date input means that bound is unlimited
   const rows = allRows.filter(r =>
     (!startDate || r['Date'] >= startDate) && (!endDate || r['Date'] <= endDate))
@@ -179,8 +225,8 @@ export default function App() {
       ? urlScenario
       : loadedScenarios.find(s => s !== MAIN) ?? MAIN
     setActiveScenario(defaultScenario)
-    setScenarioEdits(loadScenarioEdits(selectedBudgetId, defaultScenario))
-    setLocalCategories(loadLocalCats(selectedBudgetId, defaultScenario))
+    setMemoEdits(loadMemoEdits(selectedBudgetId, defaultScenario))
+    setCatModel(loadCatModel(selectedBudgetId, defaultScenario))
     Promise.all([
       // without since_date the API silently returns only the last 1 year of transactions
       apiFetch(`/budgets/${selectedBudgetId}/transactions?since_date=2000-01-01`, token),
@@ -248,8 +294,8 @@ export default function App() {
       return
     }
     setActiveScenario(name)
-    setScenarioEdits(selectedBudgetId ? loadScenarioEdits(selectedBudgetId, name) : {})
-    setLocalCategories(selectedBudgetId ? loadLocalCats(selectedBudgetId, name) : {})
+    setMemoEdits(selectedBudgetId ? loadMemoEdits(selectedBudgetId, name) : {})
+    setCatModel(selectedBudgetId ? loadCatModel(selectedBudgetId, name) : EMPTY_CAT_MODEL)
     setEditLiveData(false)
     setUndoStack([])
   }
@@ -262,46 +308,51 @@ export default function App() {
     setScenarios(next)
     saveScenariosList(selectedBudgetId, next)
     setActiveScenario(name)
-    setScenarioEdits({})
-    setLocalCategories({})
+    setMemoEdits({})
+    setCatModel(EMPTY_CAT_MODEL)
     setNewScenarioInput(null)
     setEditLiveData(false)
     setUndoStack([])
   }
 
-  function resolveCategory(newCategoryId) {
-    for (const group of categoryGroups) {
-      const cat = group.categories.find(c => c.id === newCategoryId)
-      if (cat) return { newGroup: group.name, newName: cat.name }
-    }
-    const local = localCategories[newCategoryId]
-    if (local) return { newGroup: local.groupName, newName: local.name }
-    return { newGroup: '', newName: '' }
-  }
-
   const mergedCategoryGroups = useMemo(() => {
-    const groupsByName = new Map(categoryGroups.map(g => [g.name, { ...g, categories: [...g.categories] }]))
-    const addLocal = (id, name, groupName) => {
-      if (!groupsByName.has(groupName)) groupsByName.set(groupName, { id: `local-group:${groupName}`, name: groupName, categories: [] })
-      const g = groupsByName.get(groupName)
-      if (!g.categories.some(c => c.id === id)) g.categories.push({ id, name })
+    // the dropdowns' category list: YNAB categories that aren't routed away
+    // (merged/split sources have no identity of their own anymore), with
+    // overrides and group renames applied, plus scenario-local categories
+    const entries = []
+    for (const g of categoryGroups) {
+      for (const c of g.categories) {
+        if (catModel.routes[c.id]) continue
+        const def = catDef(catModel, c.id)
+        entries.push({ id: c.id, name: def.name, group: def.group })
+      }
     }
-    for (const [id, { name, groupName }] of Object.entries(localCategories)) addLocal(id, name, groupName)
-    // Safety net: also surface any category id referenced in rows that isn't in YNAB or localCategories yet.
-    // Guards against local cats getting orphaned (e.g., pre-existing scenarioEdits from before this code).
-    const known = new Set()
-    for (const g of groupsByName.values()) for (const c of g.categories) known.add(c.id)
-    for (const r of allRows) {
-      const id = r._categoryId
-      if (!id || known.has(id)) continue
-      const name  = r['Category']       || ''
-      const group = r['Category Group'] || ''
-      if (!name) continue
-      addLocal(id, name, group)
-      known.add(id)
+    for (const [id, def] of Object.entries(catModel.cats)) {
+      if (isLocalCatId(id)) entries.push({ id, name: def.name, group: def.group })
     }
-    return [...groupsByName.values()]
-  }, [categoryGroups, localCategories, allRows])
+    const ynabGroupIds = new Map(categoryGroups.map(g => [catModel.groups[g.id] ?? g.name, g.id]))
+    const byGroup = new Map()
+    for (const { id, name, group } of entries) {
+      if (!byGroup.has(group)) {
+        byGroup.set(group, { id: ynabGroupIds.get(group) ?? `local-group:${group}`, name: group, categories: [] })
+      }
+      byGroup.get(group).categories.push({ id, name })
+    }
+    return [...byGroup.values()]
+  }, [categoryGroups, catModel])
+
+  // mergeChildren: parent display name → [{ id, name }] of YNAB categories merged into it
+  // (split routes are excluded — their targets carry splitFrom pointing back at the source)
+  const mergeChildren = useMemo(() => {
+    const byParent = new Map()
+    for (const [from, into] of Object.entries(catModel.routes)) {
+      if (catModel.cats[into]?.splitFrom === from) continue
+      const parentName = catDef(catModel, into)?.name ?? into
+      if (!byParent.has(parentName)) byParent.set(parentName, [])
+      byParent.get(parentName).push({ id: from, name: ynabCatInfo.get(from)?.name ?? from })
+    }
+    return byParent
+  }, [catModel, ynabCatInfo])
 
   function buildSplitBody(txId, changedSubIds, patch) {
     const allSubs = txSubsById.current.get(txId) ?? []
@@ -318,10 +369,10 @@ export default function App() {
     ))
   }
 
-  function updateEdits(updater) {
-    setScenarioEdits(prev => {
+  function updateMemoEdits(updater) {
+    setMemoEdits(prev => {
       const next = updater(prev)
-      saveScenarioEdits(selectedBudgetId, activeScenario, next)
+      saveMemoEdits(selectedBudgetId, activeScenario, next)
       return next
     })
   }
@@ -335,26 +386,43 @@ export default function App() {
     setUndoStack(prev => prev.filter(e => !match(e)))
   }, [])
 
-  const pushEditSnapshot = (keys) => {
+  const pushMemoSnapshot = (keys) => {
     // live edits go to YNAB API and can't be reverted locally
     if (activeScenario === MAIN) return
     const prevEdits = {}
     for (const key of keys) {
-      if (key in scenarioEdits) prevEdits[key] = scenarioEdits[key]
+      if (key in memoEdits) prevEdits[key] = memoEdits[key]
     }
     // captured now: the stack is cleared on budget/scenario change, so these stay valid
     const budgetId = selectedBudgetId
     const scenario = activeScenario
     pushUndo({ scope: 'edits', undo: () => {
-      setScenarioEdits(current => {
+      setMemoEdits(current => {
         const next = { ...current }
         for (const key of keys) {
           key in prevEdits ? (next[key] = prevEdits[key]) : delete next[key]
         }
-        saveScenarioEdits(budgetId, scenario, next)
+        saveMemoEdits(budgetId, scenario, next)
         return next
       })
     }})
+  }
+
+  // every category op goes through here: guard, snapshot-undo, persist.
+  // mutate(model) returns the next model, or the same reference for a no-op.
+  const applyCatOp = (label, mutate) => {
+    if (activeScenario === MAIN && !editLiveData) return
+    const prev = catModel
+    const next = mutate(prev)
+    if (next === prev) return
+    const budgetId = selectedBudgetId
+    const scenario = activeScenario
+    pushUndo({ label, scope: 'edits', undo: () => {
+      saveCatModel(budgetId, scenario, prev)
+      setCatModel(prev)
+    }})
+    saveCatModel(budgetId, scenario, next)
+    setCatModel(next)
   }
 
   const handleUndo = useCallback(() => {
@@ -375,85 +443,130 @@ export default function App() {
     return () => document.removeEventListener('keydown', handler)
   }, [handleUndo])
 
-  const moveCategory = (catName, newGroupName) => {
-    if (activeScenario === MAIN && !editLiveData) return
-    updateEdits(prev => {
-      const next = { ...prev }
-      for (const row of allRows) {
-        if ((row['Category'] || row['Category Group']) !== catName) continue
-        const key = `${row._txId}/${row._subTxId}`
-        next[key] = { ...(prev[key] ?? {}), 'Category Group': newGroupName }
-      }
-      return next
+  const renameCategory = (catId, newName) => {
+    const trimmed = newName.trim()
+    if (!trimmed) return
+    applyCatOp(undefined, model => {
+      const def = catDef(model, catId)
+      if (!def || def.name === trimmed) return model
+      return { ...model, cats: { ...model.cats, [catId]: { ...def, name: trimmed } } }
+    })
+  }
+
+  const moveCategory = (catId, newGroupName) => {
+    applyCatOp('group move', model => {
+      const def = catDef(model, catId)
+      if (!def || def.group === newGroupName) return model
+      return { ...model, cats: { ...model.cats, [catId]: { ...def, group: newGroupName } } }
     })
   }
 
   const renameGroup = (originalName, newName) => {
     const trimmed = newName.trim()
     if (!trimmed || trimmed === originalName) return
-    if (activeScenario === MAIN && !editLiveData) return
-    updateEdits(prev => {
-      const next = { ...prev }
-      for (const row of allRows) {
-        if ((row['Category Group'] ?? '') !== originalName) continue
-        const key = `${row._txId}/${row._subTxId}`
-        next[key] = { ...(prev[key] ?? {}), 'Category Group': trimmed }
+    applyCatOp(undefined, model => {
+      const groups = { ...model.groups }
+      for (const g of categoryGroups) {
+        if ((model.groups[g.id] ?? g.name) === originalName) groups[g.id] = trimmed
       }
-      return next
+      const cats = { ...model.cats }
+      for (const [id, def] of Object.entries(model.cats)) {
+        if (def.group === originalName) cats[id] = { ...def, group: trimmed }
+      }
+      return { ...model, groups, cats }
     })
   }
 
-  const applySplit = (splitRows, validParts, assignments) => {
-    if (activeScenario === MAIN && !editLiveData) return
-    const first = splitRows[0]
-    if (!first) return
-    const groupName = first['Category Group'] ?? ''
-    const catName   = first['Category'] || first['Category Group']
-    // patch every row of the category, not just those in the visible date
-    // range; rows the editor never saw have no assignment and land in part 0
-    const targetRows = allRows.filter(r => (r['Category'] || r['Category Group']) === catName)
-    const allKeys = targetRows.map(r => `${r._txId}/${r._subTxId}`)
-    pushEditSnapshot(allKeys)
+  const mergeCategory = (fromId, intoId) => {
+    if (fromId === intoId) return
+    applyCatOp('merge', model => {
+      const routes = { ...model.routes }
+      const txCats = { ...model.txCats }
+      // flatten: anything pointing at fromId now points at intoId
+      for (const [k, v] of Object.entries(routes)) if (v === fromId) routes[k] = intoId
+      for (const [k, v] of Object.entries(txCats)) if (v === fromId) txCats[k] = intoId
+      const cats = { ...model.cats }
+      delete cats[fromId]
+      if (!isLocalCatId(fromId)) routes[fromId] = intoId
+      return { ...model, routes, txCats, cats }
+    })
+  }
 
-    // Register a local category per part (scenarios only; MAIN's split is view-only).
-    if (activeScenario !== MAIN) {
-      setLocalCategories(prev => {
-        const next = { ...prev }
-        for (const partName of validParts) {
-          const id = localCatId(groupName, partName)
-          if (!next[id]) next[id] = { name: partName, groupName }
-        }
-        saveLocalCats(selectedBudgetId, activeScenario, next)
-        return next
-      })
-    }
+  const unmergeCategory = (fromId) => {
+    applyCatOp(undefined, model => {
+      if (!model.routes[fromId]) return model
+      const routes = { ...model.routes }
+      delete routes[fromId]
+      return { ...model, routes }
+    })
+  }
 
-    updateEdits(prev => {
-      const next = { ...prev }
-      for (const r of targetRows) {
-        const key = `${r._txId}/${r._subTxId}`
-        const partIdx = assignments[key] ?? 0
-        const partName = validParts[partIdx] ?? validParts[0]
-        const patch = { 'Category': partName, 'Category Group': groupName }
-        if (activeScenario !== MAIN) patch._categoryId = localCatId(groupName, partName)
-        next[key] = { ...(prev[key] ?? {}), ...patch }
+  const applySplit = (sourceId, validParts, assignments) => {
+    // assignments: { [txKey]: partIdx }; unassigned rows (and future
+    // transactions) follow the route to part 0
+    applyCatOp('split', model => {
+      const def = catDef(model, sourceId)
+      if (!def) return model
+      const group = def.group
+      const origin = model.cats[sourceId]?.splitFrom ?? sourceId
+      const originName = model.cats[sourceId]?.splitFromName ?? ynabCatInfo.get(origin)?.name ?? def.name
+      const partIds = validParts.map(p => localCatId(group, p))
+      const cats = { ...model.cats }
+      validParts.forEach((name, i) => { cats[partIds[i]] = { name, group, splitFrom: origin, splitFromName: originName } })
+      const routes = { ...model.routes }
+      const txCats = { ...model.txCats }
+      // flatten: anything pointing at the source now points at part 0
+      for (const [k, v] of Object.entries(routes)) if (v === sourceId) routes[k] = partIds[0]
+      for (const [k, v] of Object.entries(txCats)) if (v === sourceId) txCats[k] = partIds[0]
+      if (isLocalCatId(sourceId)) delete cats[sourceId]
+      else routes[sourceId] = partIds[0]
+      for (const [key, partIdx] of Object.entries(assignments)) {
+        if (partIdx > 0 && partIds[partIdx]) txCats[key] = partIds[partIdx]
       }
-      return next
+      return { ...model, cats, routes, txCats }
+    })
+  }
+
+  const removeSplit = (origin) => {
+    applyCatOp(undefined, model => {
+      const partSet = new Set(
+        Object.entries(model.cats).filter(([, d]) => d.splitFrom === origin).map(([id]) => id))
+      if (partSet.size === 0) return model
+      const cats = { ...model.cats }
+      for (const id of partSet) delete cats[id]
+      const routes = {}
+      for (const [k, v] of Object.entries(model.routes)) {
+        if (partSet.has(k)) continue
+        const target = partSet.has(v) ? origin : v
+        if (k !== target) routes[k] = target
+      }
+      const txCats = {}
+      for (const [k, v] of Object.entries(model.txCats)) {
+        if (!partSet.has(v)) txCats[k] = v
+      }
+      return { ...model, cats, routes, txCats }
+    })
+  }
+
+  const recategorizeTx = (keys, catId) => {
+    applyCatOp(undefined, model => {
+      const txCats = { ...model.txCats }
+      for (const k of keys) txCats[k] = catId
+      return { ...model, txCats }
     })
   }
 
   const updateCategory = async (txId, subTxId, newCategoryId) => {
     if (activeScenario === MAIN && !editLiveData) return
-    const { newGroup, newName } = resolveCategory(newCategoryId)
-    const rowPatch = { _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
     const key = `${txId}/${subTxId}`
-    pushEditSnapshot([key])
 
     if (activeScenario !== MAIN) {
-      updateEdits(prev => ({ ...prev, [key]: { ...prev[key], ...rowPatch } }))
+      recategorizeTx([key], newCategoryId)
       return
     }
 
+    const info = ynabCatInfo.get(newCategoryId)
+    const rowPatch = { _categoryId: newCategoryId, 'Category Group': info?.group ?? '', 'Category': info?.name ?? '' }
     const apiPatch = { category_id: newCategoryId }
     const body = subTxId
       ? buildSplitBody(txId, new Set([subTxId]), apiPatch)
@@ -473,20 +586,15 @@ export default function App() {
 
   const bulkUpdateCategory = async (rowKeys, newCategoryId) => {
     if (activeScenario === MAIN && !editLiveData) return
-    pushEditSnapshot(rowKeys)
-    const { newGroup, newName } = resolveCategory(newCategoryId)
-    const keySet = new Set(rowKeys)
-    const rowPatch = { _categoryId: newCategoryId, 'Category Group': newGroup, 'Category': newName }
 
     if (activeScenario !== MAIN) {
-      updateEdits(prev => {
-        const next = { ...prev }
-        for (const k of keySet) next[k] = { ...prev[k], ...rowPatch }
-        return next
-      })
+      recategorizeTx(rowKeys, newCategoryId)
       return
     }
 
+    const keySet = new Set(rowKeys)
+    const info = ynabCatInfo.get(newCategoryId)
+    const rowPatch = { _categoryId: newCategoryId, 'Category Group': info?.group ?? '', 'Category': info?.name ?? '' }
     const selected = baseRows.filter(r => keySet.has(`${r._txId}/${r._subTxId}`))
     const nonSplit  = selected.filter(r => r._subTxId === null)
     const split     = selected.filter(r => r._subTxId !== null)
@@ -521,12 +629,12 @@ export default function App() {
 
   const updateMemo = async (txId, subTxId, newMemo) => {
     if (activeScenario === MAIN && !editLiveData) return
-    pushEditSnapshot([`${txId}/${subTxId}`])
+    pushMemoSnapshot([`${txId}/${subTxId}`])
     const rowPatch = { 'Memo': newMemo }
     const key = `${txId}/${subTxId}`
 
     if (activeScenario !== MAIN) {
-      updateEdits(prev => ({ ...prev, [key]: { ...prev[key], ...rowPatch } }))
+      updateMemoEdits(prev => ({ ...prev, [key]: { ...prev[key], ...rowPatch } }))
       return
     }
 
@@ -649,7 +757,7 @@ export default function App() {
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
-        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} budgetId={selectedBudgetId} scenario={activeScenario} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} onMoveCategory={moveCategory} onApplySplit={applySplit} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
+        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} budgetId={selectedBudgetId} scenario={activeScenario} categoryGroups={mergedCategoryGroups} catModel={catModel} mergeChildren={mergeChildren} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} onRenameCategory={renameCategory} onMoveCategory={moveCategory} onMergeCategory={mergeCategory} onUnmergeCategory={unmergeCategory} onApplySplit={applySplit} onRemoveSplit={removeSplit} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
       </div>
     </div>
   )

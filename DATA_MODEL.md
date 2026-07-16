@@ -1,6 +1,7 @@
 # Data model
 
-Last verified against the code: 2026-07-11. If you change any layer below, update this file.
+Last verified against the code: 2026-07-12 (id-keyed catModel refactor). If you
+change any layer below, update this file.
 
 ## Layer 0: YNAB (source of truth)
 
@@ -10,118 +11,116 @@ Last verified against the code: 2026-07-11. If you change any layer below, updat
   - `GET /budgets/{id}/transactions?since_date=2000-01-01` (without `since_date`
     the API silently returns only the last year)
   - `GET /budgets/{id}/categories`
-- `txSubsById` (ref, not state): `Map<txId, subtransaction[]>` for split
-  transactions. Kept because YNAB's PATCH for one subtransaction requires
-  resending the *complete* subtransactions array.
-- Deleted transactions/subtransactions and deleted/hidden category groups are
-  filtered out at load.
+- `ynabCatInfo`: Map catId → `{ name, group, groupId }` derived from the fetch;
+  deleted/hidden groups and categories are filtered out.
+- `txSubsById` (ref): full subtransaction arrays per split transaction, because
+  YNAB's PATCH for one subtransaction requires resending the complete array.
 
-## Layer 1: rows (`baseRows` → `rows`)
+## Layer 1: rows
 
-`toRows()` flattens transactions: **one row per transaction, or one row per
-subtransaction** for splits. A row is a flat object:
+`toRows()` flattens transactions: **one row per transaction or subtransaction**.
+Row key = `` `${_txId}/${_subTxId}` `` (`_subTxId` null for non-split). Fields:
+`_categoryId`, `Account`, `Date`, `Payee`, `Category Group`, `Category`, `Memo`,
+`Outflow`/`Inflow` (dollar strings from milliunits; exactly one nonzero).
 
-| field | meaning |
-|---|---|
-| `_txId`, `_subTxId` | YNAB ids; `_subTxId` is `null` for non-split. Row key = `` `${_txId}/${_subTxId}` `` |
-| `_categoryId` | YNAB category id, or a local id (see localCategories) |
-| `Account`, `Date`, `Payee`, `Memo` | strings |
-| `Category Group`, `Category` | denormalized *names*, not ids |
-| `Outflow`, `Inflow` | dollar **strings** ("12.34"), converted from YNAB milliunits; exactly one is nonzero |
+Money convention everywhere: `netSpend(row) = Outflow − Inflow`. Displayed
+"Spending" numbers are net.
 
-Money convention everywhere downstream: `netSpend(row) = Outflow − Inflow`
-(so refunds/inflows reduce spending). Displayed "Spending" numbers are net.
+## Layer 2: the scenario catModel (id-keyed category mapping)
+
+A scenario is a local overlay on live YNAB data; `main` = live. Each scenario's
+category changes live in **one materialized mapping** (the folded form of a
+changelog), persisted at `localStorage.ynab_catmodel_{budgetId}_{scenario}`:
+
+```js
+{
+  cats:   { [catId]: { name, group, splitFrom?, splitFromName? } },
+  routes: { [ynabCatId]: catId },   // that category's transactions display as catId
+  txCats: { [txKey]: catId },       // per-transaction exceptions
+  groups: { [ynabGroupId]: newName } // group renames
+}
+```
+
+- `catId` = a YNAB category id, or `local:{group}:{name}` for scenario-created
+  categories (split parts).
+- **Row resolution** (App.jsx, memoized):
+  `catId = txCats[txKey] ?? routes[row._categoryId] ?? row._categoryId`, then
+  name/group from `cats[catId] ?? ynabCatInfo` (YNAB groups pass through
+  `groups[]` renames). Resolved rows carry the final `_categoryId` and, when it
+  changed, `_ynabCategoryId` (the original — used for merge-child totals).
+  Because keys are ids, **new YNAB transactions inherit all scenario ops**.
+- **No-chains invariant**: `routes`/`txCats` values always point at final live
+  catIds; every op flattens as it writes. Consequence: "ungroup" long after a
+  merge can't restore per-tx assignments that were rewritten (⌘Z right after
+  can — op undo restores a whole-model snapshot).
+- **Ops** (App.jsx, each wrapped in `applyCatOp` = guard + snapshot-undo +
+  persist): `renameCategory`, `moveCategory` (to another group), `renameGroup`,
+  `mergeCategory`/`unmergeCategory`, `applySplit`/`removeSplit`,
+  `recategorizeTx`. Splits: unassigned and future transactions follow the route
+  to part 0; parts record `splitFrom` (ynab origin id) + `splitFromName`.
+- **Memo edits** are the only remaining per-row patches:
+  `localStorage.ynab_memoedits_{budgetId}_{scenario}`, applied before resolution.
+- Edit routing: non-main → catModel/memoEdits. Main + "Edit live data" →
+  single-tx category/memo edits PATCH YNAB and mutate `baseRows`; category ops
+  (rename/merge/split/move) write main's catModel (they have no YNAB API
+  equivalent). Main + toggle off → no-ops.
+- `mergedCategoryGroups` (feeds the category dropdowns): YNAB categories not
+  routed away, with overrides and group renames applied, plus local categories.
+- Pre-refactor keys (`ynab_scenario_*`, `ynab_localcats_*`, `ynab_report_merges_*`,
+  `ynab_report_splits_*`, `ynab_report_hidden_*`) are abandoned, not migrated.
 
 ### Date range
 
-App derives two row sets: `allRows` (all transactions, scenario edits
-applied) and `rows` (`allRows` filtered to the header date pickers; defaults:
-one year ago → today; a cleared input means that bound is unlimited). Tabs
-and reports display `rows`. Bulk name-based edits — `moveCategory`,
-`renameGroup`, `applySplit` — and the `mergedCategoryGroups` safety net use
-`allRows`, so they always cover every date. When a split is saved, rows the
-split editor never showed (outside the range) have no assignment and land in
-part 0 — the classifier only ran on visible rows.
-
-## Layer 2: scenarios (branching)
-
-A scenario is a named local overlay on the live data. `main` = live YNAB.
-
-- Scenario list: `localStorage.ynab_scenarios_{budgetId}`.
-- `scenarioEdits`: `{ [rowKey]: partialRowPatch }`, persisted at
-  `localStorage.ynab_scenario_{budgetId}_{scenarioName}`.
-  `rows = applyEdits(baseRows, scenarioEdits)` — a shallow merge per row.
-- `localCategories`: `{ [id]: { name, groupName } }`, persisted at
-  `localStorage.ynab_localcats_{budgetId}_{scenarioName}`. These are
-  scenario-only categories (created by saving a split); ids look like
-  `local:{groupName}:{catName}`. `mergedCategoryGroups` = YNAB groups +
-  local categories + a safety net for category ids referenced in rows but
-  known nowhere else.
-- Edit routing (`updateCategory` / `bulkUpdateCategory` / `updateMemo` /
-  `moveCategory` / `renameGroup` / `applySplit`):
-  - **Non-main scenario** → write to `scenarioEdits` only. Undoable via
-    `editUndoStack` (in-memory, not persisted).
-  - **Main + "Edit live data" on** → PATCH the YNAB API and update `baseRows`
-    in place. Not undoable.
-  - **Main + edit toggle off** → no-op (functions return early).
-- `moveCategory` / `renameGroup` are implemented as bulk row edits (they patch
-  `Category Group` on every matching row), not as first-class group objects.
+`allRows` = memo edits + resolution applied; `rows` = `allRows` filtered to the
+header date pickers (defaults: one year ago → today; a cleared input means that
+bound is unlimited). Tabs display `rows`. Ops operate on the catModel directly,
+so they always cover every date.
 
 ## Layer 3: report-view state (display-only, per budget + scenario)
 
-All in `ReportsTab`, persisted to localStorage, keyed
-`ynab_report_{kind}_{budgetId}_{scenario}`:
+Rows arrive in ReportsTab fully resolved — it never re-derives categories.
 
-| kind | shape | what it does |
+| state | persisted at | what it does |
 |---|---|---|
-| `hidden` | `Set<categoryName>` | excluded from treemap; greyed with "—" share in the table |
-| `merges` | `Map<childName, parentName>` | child's total rolls into parent **in the left table only** |
-| `splits` | `Map<catName, {parts, assignments, manualKeys}>` | provisional split of one category into parts, with per-row assignments (Naive Bayes autoclassifier for unassigned rows). Applied **in the treemap only** until "Save", which converts it into real `scenarioEdits` + `localCategories` and deletes the view-level entry |
-| `lumps` | `Set<groupName>` | group renders as one treemap cell (all its rows collapse to the group name) **in the treemap only** |
+| `hiddenCatIds` (Set of catIds) | `ynab_report_hiddenids_*` | excluded from treemap; greyed in table |
+| `lumpedGroups` (Set of group names) | `ynab_report_lumps_*` | group renders as one treemap cell |
+| `zoomedGroup`, `payeeSplitCats`, selections, `tableSort` | in-memory | zoom view, payee breakdown, detail panel, table sort |
 
-Everything in layer 3 is keyed by *name* (not id), so renames can orphan
-entries silently.
+The old display-only "merges" are gone: drag-merge now calls the real
+`mergeCategory` op, so the table and treemap can no longer disagree about
+merges. Merge subrows in the table come from `mergeChildren` (App-derived from
+`routes`); their totals use `_ynabCategoryId`.
+
+The split editor's in-progress state (`editingSplit`, with the Naive Bayes
+payee classifier) is in-memory only; Save converts it into an `applySplit` op.
 
 ## Undo
 
-One app-wide, in-memory `undoStack` in `App.jsx`; ⌘Z/Ctrl-Z and the single
-Undo button (tab bar) pop it. Entries are `{ label?, scope, key?, undo }`
-where `undo` is a closure that reverses the action:
+One app-wide, in-memory `undoStack` in `App.jsx`; ⌘Z/Ctrl-Z and the single Undo
+button pop it. Entries `{ label?, scope, undo }`:
 
-- `scope: 'edits'` — scenario-edit snapshots (category/memo/split changes).
-  Not pushed on main (live YNAB edits can't be reverted locally).
-- `scope: 'reports'` — merges, group moves, lump/split toggles.
+- `scope: 'edits'` — catModel op snapshots + memo-edit snapshots. Survive tab
+  switches; not pushed on main (live YNAB edits can't be reverted locally,
+  except main-catModel ops which are snapshots like any other).
+- `scope: 'reports'` — view toggles (lump, payee-split); pruned when ReportsTab
+  unmounts (their closures die with it).
 - `scope: 'splitEditor'` — assignment moves inside the open split editor;
-  pruned whenever the editor closes (their closures reference the open
-  editor's state).
+  pruned whenever the editor closes.
 
-Reports/splitEditor closures capture ReportsTab state setters, so ReportsTab
-prunes both scopes on unmount (i.e., switching to the Transactions tab
-forgets Reports undos — same as when each tab had its own stack). The whole
-stack is cleared on budget or scenario switch. No redo.
-
-## The two Reports aggregations (they disagree by design/hack)
-
-- `allData` → the left table. Sums `netSpend` per label, applies **merges**
-  only. Shows negative values as-is. Hidden categories still listed (greyed).
-- `twoLevelData` → the treemap. Group → category hierarchy; applies
-  **hidden, splits, lumps** (not merges); then filters cells to `value > 0`
-  and drops empty groups. Consequences:
-  - Net-negative categories silently vanish from the treemap.
-  - A lumped group whose total net ≤ 0 vanishes entirely — including its
-    un-lump button, which only renders on visible groups (no UI way back;
-    clear the `ynab_report_lumps_*` key).
+Whole stack cleared on budget or scenario switch. No redo.
 
 ## URL / navigation
 
 Path is `/{scenario}/{tab}`, read once at startup, then kept in sync with
-`history.replaceState`. Unknown scenario/tab in the URL → error banner +
-fallback.
+`history.replaceState`. Unknown scenario/tab → error banner + fallback.
 
 ## Known cruft / TODOs
 
-- Commit `715e8d9`: "ugh this is a hack, todo fix the data model" — the
-  name-keyed, three-layer split between scenarioEdits / report-view state /
-  YNAB is the hack in question.
-- Merges affect the table but not the treemap; view-level splits affect the
-  treemap but not the table.
+- Treemap/table cells filter to `value > 0`: net-negative categories silently
+  vanish from the treemap (and a lumped group with net ≤ 0 disappears entirely,
+  including its un-lump button — recover via `ynab_report_lumps_*`).
+- View state that is still name-keyed: `lumpedGroups`, `payeeSplitCats`,
+  `selectedCategory` — same-named categories in different groups can collide
+  there. Id-based selection is a possible follow-up.
+- Split part ids are `local:{group}:{name}`, so renaming/moving a part keeps
+  the old id string (harmless, just no longer descriptive).

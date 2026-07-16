@@ -17,6 +17,10 @@ const COLORS = [
   '#1abc9c', '#e74c3c', '#3498db', '#9b59b6', '#2ecc71',
 ]
 
+const OVERLAY_BTN_STYLE = { fontSize: '10px', padding: '0 6px', cursor: 'pointer', border: '1px solid rgba(255,255,255,0.6)', borderRadius: '3px', background: 'rgba(0,0,0,0.35)', color: '#fff', flexShrink: 0 }
+
+const ZOOM_MS = 300
+
 const dollarFormatter = (value) =>
   '$' + value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
 
@@ -90,26 +94,15 @@ function classifyAll(rows, assignments, manualKeys, numParts) {
   return next
 }
 
-export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup, onMoveCategory, onApplySplit, onPushUndo, onRemoveUndos }) {
-  const hiddenKey  = `ynab_report_hidden_${budgetId}_${scenario}`
-  const mergesKey  = `ynab_report_merges_${budgetId}_${scenario}`
-  const splitsKey  = `ynab_report_splits_${budgetId}_${scenario}`
+export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, catModel, mergeChildren, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameGroup, onRenameCategory, onMoveCategory, onMergeCategory, onUnmergeCategory, onApplySplit, onRemoveSplit, onPushUndo, onRemoveUndos }) {
+  // keyed by catId (post-refactor); the old name-keyed ynab_report_hidden_* keys are abandoned
+  const hiddenKey  = `ynab_report_hiddenids_${budgetId}_${scenario}`
   const lumpsKey   = `ynab_report_lumps_${budgetId}_${scenario}`
 
-  const [hiddenNames, setHiddenNames] = useState(() => {
+  // hiddenCatIds: Set<catId> — categories excluded from the treemap
+  const [hiddenCatIds, setHiddenCatIds] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem(hiddenKey)) ?? []) }
     catch { return new Set() }
-  })
-  // merges: Map<childName, parentName> — purely display-level, no data changes
-  const [merges, setMerges] = useState(() => {
-    try { return new Map(JSON.parse(localStorage.getItem(mergesKey)) ?? []) }
-    catch { return new Map() }
-  })
-  // splits: Map<catName, {parts, assignments, manualKeys}>
-  // assignments: {[txKey]: partIndex}; manualKeys: string[] (serialized Set)
-  const [splits, setSplits] = useState(() => {
-    try { return new Map(JSON.parse(localStorage.getItem(splitsKey)) ?? []) }
-    catch { return new Map() }
   })
   // lumpedGroups: Set<groupName> — groups displayed as a single cell instead of per-category cells
   const [lumpedGroups, setLumpedGroups] = useState(() => {
@@ -119,6 +112,8 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
   const [dragging,         setDragging]         = useState(null)
   const [dropTarget,       setDropTarget]       = useState(null)
   const [selectedCategory, setSelectedCategory] = useState(null)
+  // selectedPayee: narrows the detail panel to one payee within selectedCategory (set from zoomed payee boxes)
+  const [selectedPayee,    setSelectedPayee]    = useState(null)
   const [editingGroup,     setEditingGroup]     = useState(null) // { name, value } | null
   const [contextMenu,      setContextMenu]      = useState(null) // { x, y, name } | null
   // editingSplit: { catName, parts, assignments, manualKeys, automatic } | null
@@ -127,6 +122,15 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
   // splitFocusedKey: key of card with keyboard focus, for shift+up/down range-select
   const [splitFocusedKey,   setSplitFocusedKey]   = useState(null)
   const [groupPositions,   setGroupPositions]   = useState({})
+  const [tableSort,        setTableSort]        = useState({ key: 'value', dir: 'desc' })
+  // zoomedGroup: group name whose categories fill the treemap instead of the all-groups view
+  const [zoomedGroup,      setZoomedGroup]      = useState(null)
+  // payeeSplitCats: categories shown broken down by payee while zoomed (view-only, not persisted)
+  const [payeeSplitCats,   setPayeeSplitCats]   = useState(new Set())
+  // zoomAnim: { transform, transition } while the zoom in/out animation plays, else null
+  const [zoomAnim,         setZoomAnim]         = useState(null)
+  // the group-rect transform captured at zoom-in, replayed for the zoom-out animation
+  const zoomTransformRef = useRef(null)
   const [dragLabel,        setDragLabel]        = useState(null) // { text, x, y, width, height } | null
   const [catSearch,        setCatSearch]        = useState('')
   const svgWrapperRef = useRef(null)
@@ -134,16 +138,8 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
   const detailSelectionRef = useRef(new Set())
 
   useEffect(() => {
-    localStorage.setItem(hiddenKey, JSON.stringify([...hiddenNames]))
-  }, [hiddenNames, hiddenKey])
-
-  useEffect(() => {
-    localStorage.setItem(mergesKey, JSON.stringify([...merges]))
-  }, [merges, mergesKey])
-
-  useEffect(() => {
-    localStorage.setItem(splitsKey, JSON.stringify([...splits]))
-  }, [splits, splitsKey])
+    localStorage.setItem(hiddenKey, JSON.stringify([...hiddenCatIds]))
+  }, [hiddenCatIds, hiddenKey])
 
   useEffect(() => {
     localStorage.setItem(lumpsKey, JSON.stringify([...lumpedGroups]))
@@ -194,21 +190,6 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
 
   const splitStateRef = useRef({})
 
-  const doUngroup = useCallback((childName) => {
-    setMerges(prev => { const next = new Map(prev); next.delete(childName); return next })
-  }, [])
-
-  const handleMerge = useCallback((fromName, toName) => {
-    setMerges(prev => new Map(prev).set(fromName, toName))
-    onRemoveUndos(e => e.key === `merge:${fromName}`)
-    onPushUndo({ label: 'merge', scope: 'reports', key: `merge:${fromName}`, undo: () => doUngroup(fromName) })
-  }, [onPushUndo, onRemoveUndos, doUngroup])
-
-  const applyUngroup = useCallback((childName) => {
-    doUngroup(childName)
-    onRemoveUndos(e => e.key === `merge:${childName}`)
-  }, [doUngroup, onRemoveUndos])
-
   const toggleLump = useCallback((groupName) => {
     const wasLumped = lumpedGroups.has(groupName)
     onPushUndo({ label: wasLumped ? 'split' : 'lump', scope: 'reports', undo: () => setLumpedGroups(prev => {
@@ -223,70 +204,111 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
     })
   }, [lumpedGroups, onPushUndo])
 
+  const startZoom = (name) => {
+    setZoomedGroup(name)
+    const el  = svgWrapperRef.current
+    const pos = groupPositions[name]
+    if (!el || !pos) return // nothing to animate from; jump cut
+    const { width: W, height: H } = el.getBoundingClientRect()
+    const t = `translate(${pos.x}px, ${pos.y}px) scale(${pos.width / W}, ${pos.height / H})`
+    zoomTransformRef.current = t
+    setZoomAnim({ transform: t, transition: false })
+    // two frames: first paints the shrunk state, second starts the transition
+    requestAnimationFrame(() => requestAnimationFrame(() =>
+      setZoomAnim({ transform: 'none', transition: true })))
+    setTimeout(() => setZoomAnim(null), ZOOM_MS + 100)
+  }
+
+  const endZoom = () => {
+    const t = zoomTransformRef.current
+    if (!t) { setZoomedGroup(null); return } // no stored rect; jump cut
+    setZoomAnim({ transform: t, transition: true })
+    setTimeout(() => {
+      setZoomedGroup(null)
+      setZoomAnim(null)
+    }, ZOOM_MS)
+  }
+
+  const togglePayeeSplit = useCallback((catName) => {
+    const wasSplit = payeeSplitCats.has(catName)
+    onPushUndo({ label: wasSplit ? 'lump' : 'split', scope: 'reports', undo: () => setPayeeSplitCats(prev => {
+      const next = new Set(prev)
+      wasSplit ? next.add(catName) : next.delete(catName)
+      return next
+    })})
+    setPayeeSplitCats(prev => {
+      const next = new Set(prev)
+      next.has(catName) ? next.delete(catName) : next.add(catName)
+      return next
+    })
+  }, [payeeSplitCats, onPushUndo])
+
   // this component's undo closures die with it, so drop them from the app stack on unmount
   useEffect(() => {
     return () => onRemoveUndos(e => e.scope === 'reports' || e.scope === 'splitEditor')
   }, [onRemoveUndos])
 
-  // allData: child spending is rolled up into the parent
+  // allData: rows arrive with merges/splits already resolved, so this is a plain
+  // sum per display name; catId (first row's) drives the hide button
   const allData = useMemo(() => {
     const totals = new Map()
+    const groupOf = new Map()
+    const catIdOf = new Map()
     for (const row of rows) {
       const label = rowLabel(row)
       if (!label) continue
       const net = netSpend(row)
       if (net === 0) continue
-      const target = merges.get(label) ?? label
-      totals.set(target, (totals.get(target) ?? 0) + net)
+      totals.set(label, (totals.get(label) ?? 0) + net)
+      if (!groupOf.has(label)) groupOf.set(label, row['Category Group'] || '(none)')
+      if (!catIdOf.has(label) && row._categoryId) catIdOf.set(label, row._categoryId)
     }
     return [...totals.entries()]
-      .map(([name, value]) => ({ name, value: Math.round(value * 100) / 100 }))
+      .map(([name, value]) => ({ name, group: groupOf.get(name), catId: catIdOf.get(name), value: Math.round(value * 100) / 100 }))
       .sort((a, b) => b.value - a.value)
-  }, [rows, merges])
+      // colorIndex is fixed by the default (spending-desc) order so swatches don't change when re-sorting
+      .map((d, i) => ({ ...d, colorIndex: i }))
+  }, [rows])
 
-  // childTotals: per-child spending for the table breakdown
+  const sortedAllData = useMemo(() => {
+    const field = tableSort.key === 'share' ? 'value' : tableSort.key
+    const mul = tableSort.dir === 'desc' ? -1 : 1
+    return [...allData].sort((a, b) => {
+      const av = a[field]
+      const bv = b[field]
+      const cmp = typeof av === 'number' ? av - bv : String(av ?? '').localeCompare(String(bv ?? ''))
+      return mul * cmp
+    })
+  }, [allData, tableSort])
+
+  // childTotals: catId → net spend of rows that originally belonged to that
+  // (merged-away) category; _ynabCategoryId preserves the pre-resolution id
   const childTotals = useMemo(() => {
     const totals = new Map()
     for (const row of rows) {
-      const label = rowLabel(row)
-      if (!label || !merges.has(label)) continue
+      const orig = row._ynabCategoryId
+      if (!orig || orig === row._categoryId) continue
       const net = netSpend(row)
       if (net === 0) continue
-      totals.set(label, (totals.get(label) ?? 0) + net)
+      totals.set(orig, (totals.get(orig) ?? 0) + net)
     }
     return totals
-  }, [rows, merges])
-
-  // parentName → [childName, ...]
-  const childrenOf = useMemo(() => {
-    const map = new Map()
-    for (const [child, parent] of merges) {
-      if (!map.has(parent)) map.set(parent, [])
-      map.get(parent).push(child)
-    }
-    return map
-  }, [merges])
+  }, [rows])
 
   const twoLevelData = useMemo(() => {
     const groupMap = new Map()
-    // tracks which display-level cat names were produced by a split (effectiveName → originalName)
-    const splitOrigins = new Map()
+    const cellCatIds = new Map() // `${group} ${cat}` → catId (first row's)
     for (const row of rows) {
       const net = netSpend(row)
       if (net === 0) continue
-      const baseGroup = row['Category Group'] || '(none)'
-      const cat       = row['Category'] || baseGroup
-      if (hiddenNames.has(cat)) continue
-      const group    = baseGroup
-      const splitDef = splits.get(cat)
-      let effectiveCat = cat
-      if (splitDef?.parts?.length >= 2) {
-        const key = `${row._txId}/${row._subTxId}`
-        const idx = splitDef.assignments[key] ?? 0
-        effectiveCat = splitDef.parts[idx] ?? splitDef.parts[0]
-        splitOrigins.set(effectiveCat, cat)
-      }
+      if (hiddenCatIds.has(row._categoryId)) continue
+      const group = row['Category Group'] || '(none)'
+      let effectiveCat = row['Category'] || group
       if (lumpedGroups.has(group)) effectiveCat = group
+      else {
+        const cellKey = `${group} ${effectiveCat}`
+        if (!cellCatIds.has(cellKey)) cellCatIds.set(cellKey, row._categoryId)
+      }
       if (!groupMap.has(group)) groupMap.set(group, new Map())
       groupMap.get(group).set(effectiveCat, (groupMap.get(group).get(effectiveCat) ?? 0) + net)
     }
@@ -299,7 +321,8 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
             name: cName,
             value: Math.round(value * 100) / 100,
             groupColorIndex: gi,
-            _splitFrom: splitOrigins.get(cName),
+            // null for lumped-group cells, which don't represent one category
+            _catId: cellCatIds.get(`${gName} ${cName}`) ?? null,
             _groupName: gName,
           }))
           .filter(c => c.value > 0)
@@ -311,33 +334,60 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
         const bSum = b.children.reduce((s, c) => s + c.value, 0)
         return bSum - aSum
       })
-  }, [rows, hiddenNames, splits, lumpedGroups])
+  }, [rows, hiddenCatIds, lumpedGroups])
+
+  // zoomed view: categories of one group; a payee-split category gets one child per payee,
+  // otherwise a single child spanning the whole category (mirrors twoLevelData's shape)
+  const zoomedData = useMemo(() => {
+    if (!zoomedGroup) return []
+    const catMap = new Map() // display cat name → Map<payee, total>
+    const catIds = new Map() // display cat name → catId (first row's)
+    for (const row of rows) {
+      const net = netSpend(row)
+      if (net === 0) continue
+      if ((row['Category Group'] || '(none)') !== zoomedGroup) continue
+      if (hiddenCatIds.has(row._categoryId)) continue
+      const cat = row['Category'] || row['Category Group'] || '(none)'
+      const payee = row['Payee'] || '(none)'
+      if (!catMap.has(cat)) catMap.set(cat, new Map())
+      if (!catIds.has(cat)) catIds.set(cat, row._categoryId)
+      const pm = catMap.get(cat)
+      pm.set(payee, (pm.get(payee) ?? 0) + net)
+    }
+    return [...catMap.entries()]
+      .map(([cName, payeeMap], ci) => {
+        const total = [...payeeMap.values()].reduce((s, v) => s + v, 0)
+        const children = (payeeSplitCats.has(cName)
+          ? [...payeeMap.entries()].map(([pName, v]) => ({ name: pName, value: Math.round(v * 100) / 100, groupColorIndex: ci, _catName: cName, _isPayee: true }))
+          : [{ name: cName, value: Math.round(total * 100) / 100, groupColorIndex: ci, _catName: cName, _isPayee: false }])
+          .filter(c => c.value > 0)
+          .sort((a, b) => b.value - a.value)
+        return { name: cName, groupColorIndex: ci, _catId: catIds.get(cName), children }
+      })
+      .filter(g => g.children.length > 0)
+      .sort((a, b) => {
+        const aSum = a.children.reduce((s, c) => s + c.value, 0)
+        const bSum = b.children.reduce((s, c) => s + c.value, 0)
+        return bSum - aSum
+      })
+  }, [zoomedGroup, rows, hiddenCatIds, payeeSplitCats])
 
   const filteredRows = useMemo(() => {
     if (!selectedCategory) return []
-    for (const [catName, splitDef] of splits) {
-      const partIdx = splitDef.parts.indexOf(selectedCategory)
-      if (partIdx !== -1) {
-        return rows.filter(r => {
-          if (rowLabel(r) !== catName) return false
-          const key = `${r._txId}/${r._subTxId}`
-          return (splitDef.assignments[key] ?? 0) === partIdx
-        })
-      }
-    }
-    if (lumpedGroups.has(selectedCategory)) {
-      return rows.filter(r => (r['Category Group'] || '(none)') === selectedCategory)
-    }
-    return rows.filter(r => rowLabel(r) === selectedCategory)
-  }, [selectedCategory, rows, splits, lumpedGroups])
+    const base = lumpedGroups.has(selectedCategory)
+      ? rows.filter(r => (r['Category Group'] || '(none)') === selectedCategory)
+      : rows.filter(r => rowLabel(r) === selectedCategory)
+    if (!selectedPayee) return base
+    return base.filter(r => (r['Payee'] || '(none)') === selectedPayee)
+  }, [selectedCategory, selectedPayee, rows, lumpedGroups])
 
-  const selectedSplitFrom = useMemo(() => {
-    if (!selectedCategory) return null
-    for (const [catName, splitDef] of splits) {
-      if (splitDef.parts.includes(selectedCategory)) return catName
-    }
-    return null
-  }, [selectedCategory, splits])
+  // catId behind the current selection; null for lumped-group selections
+  const selectedCatId = useMemo(() => {
+    if (!selectedCategory || lumpedGroups.has(selectedCategory)) return null
+    return filteredRows[0]?._categoryId ?? null
+  }, [selectedCategory, lumpedGroups, filteredRows])
+
+  const selectedSplitFrom = selectedCatId ? (catModel.cats[selectedCatId]?.splitFromName ?? null) : null
 
   const splitEditorRows = useMemo(() => {
     if (!editingSplit) return []
@@ -381,10 +431,9 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
   }, [])
 
   const openSplitEditor = (catName, preassignedKeys) => {
-    const existing = splits.get(catName)
-    let assignments  = { ...(existing?.assignments ?? {}) }
-    const manualKeys = new Set(existing?.manualKeys ?? [])
-    const parts      = existing?.parts ?? [catName, '']
+    let assignments  = {}
+    const manualKeys = new Set()
+    const parts      = [catName, '']
     if (preassignedKeys && preassignedKeys.size > 0) {
       for (const k of preassignedKeys) {
         assignments[k] = 1
@@ -399,6 +448,7 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
     setSplitSelectedKeys(new Set())
     setSplitFocusedKey(null)
     setSelectedCategory(null)
+    setSelectedPayee(null)
   }
 
   // closing the editor invalidates its undo entries (they reference the open editor's state)
@@ -429,20 +479,25 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
   }
 
   const saveSplit = () => {
-    const { catName, parts, assignments } = editingSplit
+    const { parts, assignments } = editingSplit
     const validParts = parts.map(p => p.trim()).filter(Boolean)
     if (validParts.length < 2) return
-    onApplySplit(splitEditorRows, validParts, assignments)
-    setSplits(prev => {
-      const next = new Map(prev)
-      next.delete(catName)
-      for (const part of validParts) next.delete(part)
-      return next
-    })
+    const sourceId = splitEditorRows[0]?._categoryId
+    if (!sourceId) return
+    onApplySplit(sourceId, validParts, assignments)
     closeSplitEditor()
   }
 
-  const renderCell = ({ x, y, width, height, depth, name, value, groupColorIndex, _splitFrom, _groupName }) => {
+  // name → catId lookup for the currently dragged cell (drag state stores only the name)
+  const catIdOfCell = (cellName) => {
+    for (const g of twoLevelData) {
+      const c = g.children.find(c => c.name === cellName)
+      if (c) return c._catId
+    }
+    return null
+  }
+
+  const renderCell = ({ x, y, width, height, depth, name, value, groupColorIndex, _catId, _groupName }) => {
     if (depth === 0 || !width || !height || width < 2 || height < 2) return null
     const color = COLORS[groupColorIndex % COLORS.length]
 
@@ -475,26 +530,27 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
         }}
         onMouseUp={() => {
           if (dragging && dragging !== name) {
-            if (dropTarget === name || sameGroup) {
-              handleMerge(dragging, name)
-            } else {
-              const prevGroup = twoLevelData.find(g => g.children.some(c => c.name === dragging))?.name
-              const cat = dragging
-              onPushUndo({ label: 'group move', scope: 'reports', undo: () => onMoveCategory(cat, prevGroup) })
-              onMoveCategory(dragging, _groupName)
+            // ops push their own undo snapshots in App; lumped cells have no
+            // _catId, so drops from/onto them are no-ops
+            const fromId = catIdOfCell(dragging)
+            if (fromId && (dropTarget === name || sameGroup)) {
+              if (_catId) onMergeCategory(fromId, _catId)
+            } else if (fromId) {
+              onMoveCategory(fromId, _groupName)
             }
             setDragging(null)
             setDropTarget(null)
             setDragLabel(null)
           } else if (dragging === name) {
             setSelectedCategory(prev => prev === name ? null : name)
+            setSelectedPayee(null)
             closeSplitEditor()
             setDragging(null)
           }
         }}
         onContextMenu={e => {
           e.preventDefault()
-          setContextMenu({ x: e.clientX, y: e.clientY, name: _splitFrom ?? name })
+          setContextMenu({ x: e.clientX, y: e.clientY, name, catId: _catId })
           setEditingGroup(null)
         }}
       >
@@ -558,10 +614,49 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
     )
   }
 
-  const toggleHidden = (name) =>
-    setHiddenNames(prev => {
+  // zoomed-view cell: same visual language as renderCell; click opens the detail
+  // panel (payee boxes narrow it to that payee), no drag/merge/context interactions
+  const renderZoomCell = ({ x, y, width, height, depth, name, value, groupColorIndex, _catName, _isPayee }) => {
+    if (depth === 0 || !width || !height || width < 2 || height < 2) return null
+    const color = COLORS[groupColorIndex % COLORS.length]
+    if (depth === 1) {
+      return (
+        <g style={{ pointerEvents: 'none' }}>
+          <rect data-group-name={name} x={x} y={y} width={width} height={height} fill={color} stroke="#fff" strokeWidth={3} opacity={0.9} />
+        </g>
+      )
+    }
+    const showText  = width > 50 && height > 24
+    const showValue = width > 70 && height > 44
+    const textY     = y + height/2 + (showValue ? -7 : 4)
+    const handleClick = () => {
+      const payee = _isPayee ? name : null
+      const same  = selectedCategory === _catName && selectedPayee === payee
+      setSelectedCategory(same ? null : _catName)
+      setSelectedPayee(same ? null : payee)
+      closeSplitEditor()
+    }
+    return (
+      <g onClick={handleClick} style={{ cursor: 'pointer' }}>
+        <rect x={x} y={y} width={width} height={height} fill={color} stroke="#fff" strokeWidth={1} opacity={0.85} />
+        {showText && (
+          <text x={x + width/2} y={textY} textAnchor="middle" fill="#fff" fontSize={12} fontWeight={600} style={{ pointerEvents: 'none' }}>
+            {name}
+          </text>
+        )}
+        {showValue && (
+          <text x={x + width/2} y={y + height/2 + 10} textAnchor="middle" fill="#fff" fontSize={11} opacity={0.85} style={{ pointerEvents: 'none' }}>
+            {dollarFormatter(value)}
+          </text>
+        )}
+      </g>
+    )
+  }
+
+  const toggleHidden = (catId) =>
+    setHiddenCatIds(prev => {
       const next = new Set(prev)
-      next.has(name) ? next.delete(name) : next.add(name)
+      next.has(catId) ? next.delete(catId) : next.add(catId)
       return next
     })
 
@@ -576,6 +671,12 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
     <div>
       <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '16px', fontSize: '14px', color: '#555' }}>
         <span>Total spending: <strong style={{ color: '#2c3e50' }}>{dollarFormatter(total)}</strong>{' '}across <strong>{visibleCount}</strong> categories</span>
+        {zoomedGroup && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, color: '#2c3e50' }}>
+            {zoomedGroup}
+            <button onClick={endZoom} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>✕</button>
+          </span>
+        )}
         {dragging && (
           <span style={{ color: '#888', fontStyle: 'italic' }}>Drop to move to that group; drop on the text label to merge</span>
         )}
@@ -592,8 +693,10 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
       </div>
 
       <div style={{ position: 'relative' }} ref={svgWrapperRef}>
+        {/* transform layer: scales treemap + labels together during zoom in/out */}
+        <div style={{ position: 'relative', transformOrigin: '0 0', transform: zoomAnim?.transform ?? 'none', transition: zoomAnim?.transition ? `transform ${ZOOM_MS}ms ease` : 'none' }}>
         <ResponsiveContainer width="99%" height={420}>
-          <Treemap data={twoLevelData} dataKey="value" content={renderCell} isAnimationActive={false}>
+          <Treemap data={zoomedGroup ? zoomedData : twoLevelData} dataKey="value" content={zoomedGroup ? renderZoomCell : renderCell} isAnimationActive={false}>
             <Tooltip content={<CustomTooltip />} animationDuration={0} wrapperStyle={{ zIndex: 10 }} />
           </Treemap>
         </ResponsiveContainer>
@@ -615,14 +718,20 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
           </div>
         )}
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'hidden' }}>
-          {twoLevelData.map(({ name, groupColorIndex }) => {
+          {(zoomedGroup ? zoomedData : twoLevelData).map(({ name, _catId }) => {
             const pos = groupPositions[name]
             if (!pos) return null
             const isEditing = editingGroup?.name === name
+            // zoomed labels rename the category (by id); main-view labels rename the group (by name)
+            const commitRename = (value) => {
+              zoomedGroup ? onRenameCategory(_catId, value) : onRenameGroup(name, value)
+              setEditingGroup(null)
+            }
             return (
               <div
                 key={name}
-                onClick={() => { if (!isEditing) setEditingGroup({ name, value: name }) }}
+                data-label-for={name}
+                onClick={() => { if (!isEditing && (!zoomedGroup || _catId)) setEditingGroup({ name, value: name }) }}
                 style={{
                   position: 'absolute',
                   left: pos.x + 6,
@@ -637,9 +746,9 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
                     autoFocus
                     value={editingGroup.value}
                     onChange={e => setEditingGroup(prev => ({ ...prev, value: e.target.value }))}
-                    onBlur={() => { onRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }}
+                    onBlur={() => commitRename(editingGroup.value)}
                     onKeyDown={e => {
-                      if (e.key === 'Enter')  { e.stopPropagation(); onRenameGroup(editingGroup.name, editingGroup.value); setEditingGroup(null) }
+                      if (e.key === 'Enter')  { e.stopPropagation(); commitRename(editingGroup.value) }
                       if (e.key === 'Escape') { e.stopPropagation(); setEditingGroup(null) }
                     }}
                     style={{ background: 'rgba(0,0,0,0.35)', border: 'none', outline: 'none', color: '#fff', fontSize: '12px', fontWeight: 700, fontFamily: 'sans-serif', width: '160px', padding: '0 2px', borderBottom: '1px solid rgba(255,255,255,0.7)' }}
@@ -649,21 +758,38 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
                     <span style={{ color: '#fff', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap', userSelect: 'none', textShadow: '0 1px 3px rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.3)' }}>
                       {name}
                     </span>
-                    <button
-                      onClick={e => {
-                        e.stopPropagation()
-                        toggleLump(name)
-                      }}
-                      onMouseDown={e => e.stopPropagation()}
-                      style={{ fontSize: '10px', padding: '0 6px', cursor: 'pointer', border: '1px solid rgba(255,255,255,0.6)', borderRadius: '3px', background: 'rgba(0,0,0,0.35)', color: '#fff', flexShrink: 0 }}
-                    >
-                      {lumpedGroups.has(name) ? 'split' : 'lump'}
-                    </button>
+                    {zoomedGroup ? (
+                      <button
+                        onClick={e => { e.stopPropagation(); togglePayeeSplit(name) }}
+                        onMouseDown={e => e.stopPropagation()}
+                        style={OVERLAY_BTN_STYLE}
+                      >
+                        {payeeSplitCats.has(name) ? 'lump' : 'split'}
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          onClick={e => { e.stopPropagation(); toggleLump(name) }}
+                          onMouseDown={e => e.stopPropagation()}
+                          style={OVERLAY_BTN_STYLE}
+                        >
+                          {lumpedGroups.has(name) ? 'split' : 'lump'}
+                        </button>
+                        <button
+                          onClick={e => { e.stopPropagation(); startZoom(name) }}
+                          onMouseDown={e => e.stopPropagation()}
+                          style={OVERLAY_BTN_STYLE}
+                        >
+                          zoom
+                        </button>
+                      </>
+                    )}
                   </span>
                 )}
               </div>
             )
           })}
+        </div>
         </div>
       </div>
 
@@ -686,14 +812,14 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
         >
           <div
             onClick={() => { openSplitEditor(contextMenu.name); setContextMenu(null) }}
-            style={{ padding: '8px 16px', cursor: 'pointer', borderBottom: splits.has(contextMenu.name) ? '1px solid #eee' : 'none' }}
+            style={{ padding: '8px 16px', cursor: 'pointer', borderBottom: catModel.cats[contextMenu.catId]?.splitFrom ? '1px solid #eee' : 'none' }}
           >
             Split...
           </div>
-          {splits.has(contextMenu.name) && (
+          {catModel.cats[contextMenu.catId]?.splitFrom && (
             <div
               onClick={() => {
-                setSplits(prev => { const next = new Map(prev); next.delete(contextMenu.name); return next })
+                onRemoveSplit(catModel.cats[contextMenu.catId].splitFrom)
                 setContextMenu(null)
               }}
               style={{ padding: '8px 16px', cursor: 'pointer', color: '#c0392b' }}
@@ -705,55 +831,72 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
       )}
 
       <div style={{ display: 'flex', gap: '24px', alignItems: 'flex-start', marginTop: '24px' }}>
-        <table style={{ fontSize: '13px', borderCollapse: 'collapse', flexShrink: 0, width: '340px' }}>
+        <table style={{ fontSize: '13px', borderCollapse: 'collapse', flexShrink: 0, width: '460px' }}>
           <thead>
             <tr style={{ background: '#2c3e50', color: '#fff' }}>
-              <th style={{ padding: '8px 12px', textAlign: 'left' }}>Category</th>
-              <th style={{ padding: '8px 12px', textAlign: 'right' }}>Spending</th>
-              <th style={{ padding: '8px 12px', textAlign: 'right' }}>Share</th>
+              {[['Category', 'name', 'left'], ['Category Group', 'group', 'left'], ['Spending', 'value', 'right'], ['Share', 'share', 'right']].map(([label, key, align]) => (
+                <th
+                  key={key}
+                  onClick={() => setTableSort(prev => ({ key, dir: prev.key === key && prev.dir === 'desc' ? 'asc' : 'desc' }))}
+                  style={{ padding: '8px 12px', textAlign: align, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                >
+                  {label}
+                  {tableSort.key === key && <span style={{ marginLeft: '4px', opacity: 0.8 }}>{tableSort.dir === 'desc' ? '▼' : '▲'}</span>}
+                </th>
+              ))}
               <th style={{ padding: '8px 12px' }} />
             </tr>
           </thead>
           <tbody>
-            {allData.map(({ name, value }, i) => {
-              const hidden    = hiddenNames.has(name)
-              const children  = childrenOf.get(name) ?? []
+            {sortedAllData.map(({ name, group, catId, value, colorIndex }, i) => {
+              const hidden    = hiddenCatIds.has(catId)
+              const children  = mergeChildren.get(name) ?? []
               const matches   = !catSearch || name.toLowerCase().includes(catSearch.toLowerCase())
               return (
                 <Fragment key={name}>
-                  <tr style={{ background: matches && catSearch ? '#fffde7' : hidden ? '#f0f0f0' : (i % 2 === 0 ? '#fff' : '#f4f6f8'), opacity: catSearch && !matches ? 0.3 : 1 }}>
+                  <tr
+                    onClick={() => {
+                      setSelectedCategory(prev => prev === name ? null : name)
+                      setSelectedPayee(null)
+                      closeSplitEditor()
+                    }}
+                    style={{ cursor: 'pointer', background: selectedCategory === name ? '#e3f2fd' : matches && catSearch ? '#fffde7' : hidden ? '#f0f0f0' : (i % 2 === 0 ? '#fff' : '#f4f6f8'), opacity: catSearch && !matches ? 0.3 : 1 }}
+                  >
                     <td style={{ padding: '6px 12px', display: 'flex', alignItems: 'center', gap: '8px', opacity: hidden ? 0.4 : 1 }}>
-                      <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '2px', background: COLORS[i % COLORS.length], flexShrink: 0 }} />
+                      <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '2px', background: COLORS[colorIndex % COLORS.length], flexShrink: 0 }} />
                       {name}
                     </td>
+                    <td style={{ padding: '6px 12px', color: '#777', opacity: hidden ? 0.4 : 1 }}>{group}</td>
                     <td style={{ padding: '6px 12px', textAlign: 'right', opacity: hidden ? 0.4 : 1 }}>{dollarFormatter(value)}</td>
                     <td style={{ padding: '6px 12px', textAlign: 'right', color: '#777', opacity: hidden ? 0.4 : 1 }}>
                       {hidden ? '—' : `${((value / total) * 100).toFixed(1)}%`}
                     </td>
                     <td style={{ padding: '6px 8px', textAlign: 'center' }}>
                       <button
-                        onClick={() => toggleHidden(name)}
-                        style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}
+                        onClick={e => { e.stopPropagation(); toggleHidden(catId) }}
+                        disabled={!catId}
+                        style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555', opacity: catId ? 1 : 0.4 }}
                       >
                         {hidden ? 'show' : 'hide'}
                       </button>
                     </td>
                   </tr>
-                  {children.map(childName => {
-                    const spend = childTotals.get(childName) ?? 0
+                  {children.map(child => {
+                    const spend = childTotals.get(child.id) ?? 0
                     return (
-                      <tr key={childName} style={{ background: hidden ? '#f0f0f0' : (i % 2 === 0 ? '#f8f8f8' : '#efefef'), opacity: hidden ? 0.4 : 1 }}>
+                      <tr key={child.id} style={{ background: hidden ? '#f0f0f0' : (i % 2 === 0 ? '#f8f8f8' : '#efefef'), opacity: hidden ? 0.4 : 1 }}>
                         <td style={{ padding: '4px 12px 4px 28px', display: 'flex', alignItems: 'center', gap: '8px', color: '#555' }}>
                           <span style={{ color: '#bbb' }}>—</span>
-                          {childName}
+                          {child.name}
                         </td>
+                        <td />
                         <td style={{ padding: '4px 12px', textAlign: 'right', color: '#555' }}>{dollarFormatter(spend)}</td>
                         <td style={{ padding: '4px 12px', textAlign: 'right', color: '#999' }}>
                           {((spend / total) * 100).toFixed(1)}%
                         </td>
                         <td style={{ padding: '4px 8px', textAlign: 'center' }}>
                           <button
-                            onClick={() => applyUngroup(childName)}
+                            onClick={() => onUnmergeCategory(child.id)}
                             style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}
                           >
                             ungroup
@@ -932,17 +1075,20 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, o
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '8px', color: '#2c3e50', display: 'flex', alignItems: 'baseline', gap: '12px' }}>
               {selectedCategory}
+              {selectedPayee && (
+                <span style={{ fontWeight: 400, fontSize: '12px', color: '#888' }}>· {selectedPayee}</span>
+              )}
               {selectedSplitFrom && (
                 <span style={{ fontWeight: 400, fontSize: '12px', color: '#888' }}>ex {selectedSplitFrom}</span>
               )}
               <span style={{ fontWeight: 400, fontSize: '13px', color: '#555' }}>{dollarFormatter(filteredRows.reduce((s, r) => s + netSpend(r), 0))}</span>
-              <button onClick={() => toggleHidden(selectedSplitFrom ?? selectedCategory)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>
-                {hiddenNames.has(selectedSplitFrom ?? selectedCategory) ? 'show' : 'hide'}
+              <button onClick={() => toggleHidden(selectedCatId)} disabled={!selectedCatId} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555', opacity: selectedCatId ? 1 : 0.4 }}>
+                {hiddenCatIds.has(selectedCatId) ? 'show' : 'hide'}
               </button>
-              <button onClick={() => openSplitEditor(selectedSplitFrom ?? selectedCategory, detailSelectionRef.current)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: `1px solid ${splits.has(selectedSplitFrom ?? selectedCategory) ? '#81c784' : '#bbb'}`, borderRadius: '3px', background: splits.has(selectedSplitFrom ?? selectedCategory) ? '#e8f5e9' : '#f4f4f4', color: splits.has(selectedSplitFrom ?? selectedCategory) ? '#27ae60' : '#555' }}>
+              <button onClick={() => openSplitEditor(selectedCategory, detailSelectionRef.current)} style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: `1px solid ${selectedSplitFrom ? '#81c784' : '#bbb'}`, borderRadius: '3px', background: selectedSplitFrom ? '#e8f5e9' : '#f4f4f4', color: selectedSplitFrom ? '#27ae60' : '#555' }}>
                 split
               </button>
-              <button onClick={() => setSelectedCategory(null)} style={{ marginLeft: 'auto', fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>✕</button>
+              <button onClick={() => { setSelectedCategory(null); setSelectedPayee(null) }} style={{ marginLeft: 'auto', fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}>✕</button>
             </div>
             <div style={{ height: '500px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden' }}>
               <TransactionsTab

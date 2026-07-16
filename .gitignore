@@ -3,3 +3,5 @@ dist/
 .env
 *.csv
 scripts/reports.png
+test-results/
+playwright-report/

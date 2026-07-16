@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "quals": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.2",
@@ -15,6 +16,7 @@
     "recharts": "^3.8.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@vitejs/plugin-react": "^4.3.4",
     "playwright": "^1.61.1",
     "vite": "^6.3.1"
