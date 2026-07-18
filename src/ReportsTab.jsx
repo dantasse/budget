@@ -24,6 +24,21 @@ const ZOOM_MS = 300
 const dollarFormatter = (value) =>
   '$' + value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
 
+// SVG doesn't clip text to its parent rect, so cell labels are truncated to fit.
+// Canvas measureText with the page font (sans-serif) gives real pixel widths.
+const measureCtx = document.createElement('canvas').getContext('2d')
+function truncateToWidth(text, maxWidth, font) {
+  measureCtx.font = font
+  if (measureCtx.measureText(text).width <= maxWidth) return text
+  let lo = 0, hi = text.length
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (measureCtx.measureText(text.slice(0, mid) + '…').width <= maxWidth) lo = mid
+    else hi = mid - 1
+  }
+  return text.slice(0, lo) + '…'
+}
+
 function CustomTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
   const { name, value } = payload[0].payload
@@ -536,9 +551,12 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
     const sameGroup      = dragging && dragging !== name && twoLevelData.find(g => g.children.some(c => c.name === dragging))?.name === _groupName
     const isMergeTarget  = dropTarget === name           && dragging && dragging !== name
     const isGroupTarget  = dropTarget === `grp:${name}`  && dragging && dragging !== name && !sameGroup
-    const showText       = width > 50  && height > 24
+    // a lumped group's single cell would just repeat the group-label overlay's title
+    const isLump         = lumpedGroups.has(_groupName)
+    const showText       = width > 50  && height > 24 && !isLump
     const showValue      = width > 70  && height > 44
     const textY          = y + height/2 + (showValue ? -7 : 4)
+    const valueY         = y + height/2 + (showText ? 10 : 4)
     return (
       <g
         style={{ cursor: dragging ? (isDraggingThis ? 'grabbing' : 'copy') : 'pointer', userSelect: 'none' }}
@@ -601,7 +619,7 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
         {showText && !isDraggingThis && (
           <>
             <text x={x + width/2} y={textY} textAnchor="middle" fill="#fff" fontSize={12} fontWeight={600} style={{ pointerEvents: 'none' }}>
-              {name}
+              {truncateToWidth(name, width - 8, '600 12px sans-serif')}
             </text>
             {/* invisible hit-zone over text label: drop here = merge (only when cross-group) */}
             <rect
@@ -625,7 +643,7 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
           </>
         )}
         {showValue && !isDraggingThis && (
-          <text x={x + width/2} y={y + height/2 + 10} textAnchor="middle" fill="#fff" fontSize={11} opacity={0.85} style={{ pointerEvents: 'none' }}>
+          <text x={x + width/2} y={valueY} textAnchor="middle" fill="#fff" fontSize={11} opacity={0.85} style={{ pointerEvents: 'none' }}>
             {dollarFormatter(value)}
           </text>
         )}
@@ -660,7 +678,7 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
         <rect x={x} y={y} width={width} height={height} fill={color} stroke="#fff" strokeWidth={1} opacity={0.85} />
         {showText && (
           <text x={x + width/2} y={textY} textAnchor="middle" fill="#fff" fontSize={12} fontWeight={600} style={{ pointerEvents: 'none' }}>
-            {name}
+            {truncateToWidth(name, width - 8, '600 12px sans-serif')}
           </text>
         )}
         {showValue && (
@@ -756,6 +774,8 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
                   left: pos.x + 6,
                   top: pos.y + 4,
                   maxWidth: pos.width - 12,
+                  maxHeight: pos.height - 8,
+                  overflow: 'hidden',
                   pointerEvents: 'auto',
                   cursor: 'text',
                 }}
@@ -774,7 +794,7 @@ export default function ReportsTab({ rows, budgetId, scenario, categoryGroups, c
                   />
                 ) : (
                   <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span style={{ color: '#fff', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap', userSelect: 'none', textShadow: '0 1px 3px rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.3)' }}>
+                    <span style={{ color: '#fff', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, userSelect: 'none', textShadow: '0 1px 3px rgba(0,0,0,0.55), 0 0 8px rgba(0,0,0,0.3)' }}>
                       {name}
                     </span>
                     {zoomedGroup ? (

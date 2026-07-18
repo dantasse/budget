@@ -32,12 +32,16 @@ test('reports loaded directly by URL shows group labels with buttons', async ({ 
 
 test('lump collapses a group and undo restores it', async ({ page }) => {
   await launchApp(page, '/main/Reports')
-  await expect(page.locator('svg text', { hasText: /^Groceries$/ })).toBeVisible()
+  // prefix matches throughout: cell labels are truncated ("Grocer…") to fit their rects
+  await expect(page.locator('svg text', { hasText: /^Groc/ })).toBeVisible()
   await label(page, 'Essentials').getByRole('button', { name: 'lump' }).click()
-  await expect(page.locator('svg text', { hasText: /^Groceries$/ })).toHaveCount(0)
+  await expect(page.locator('svg text', { hasText: /^Groc/ })).toHaveCount(0)
+  // the lumped cell shows only its total; the title lives in the group-label overlay
+  await expect(page.locator('svg text', { hasText: /^Essentials/ })).toHaveCount(0)
+  await expect(page.locator('svg text', { hasText: /^\$1,888$/ })).toBeVisible()
   await expect(label(page, 'Essentials').getByRole('button', { name: 'split' })).toBeVisible()
   await page.keyboard.press('ControlOrMeta+z')
-  await expect(page.locator('svg text', { hasText: /^Groceries$/ })).toBeVisible()
+  await expect(page.locator('svg text', { hasText: /^Groc/ })).toBeVisible()
 })
 
 test('renaming a group in a scenario applies everywhere and persists', async ({ page }) => {
@@ -68,7 +72,7 @@ test('drag-merge combines two categories and ungroup reverses it', async ({ page
   await launchApp(page, '/main/Reports')
   await createScenario(page, 'qual-scenario')
   const games = page.locator('svg text', { hasText: /^Games$/ })
-  const restaurants = page.locator('svg text', { hasText: /^Restaurants$/ })
+  const restaurants = page.locator('svg text', { hasText: /^Rest/ })
   await expect(games).toBeVisible()
   const from = await games.boundingBox()
   const to = await restaurants.boundingBox()
@@ -88,7 +92,7 @@ test('split editor saves a split and the new category appears', async ({ page })
   await launchApp(page, '/main/Reports')
   await createScenario(page, 'qual-scenario')
   // treemap texts are pointer-events:none; force dispatches to the cell rect beneath
-  await page.locator('svg text', { hasText: /^Groceries$/ }).click({ button: 'right', force: true })
+  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
   await page.getByText('Split...').click()
   const partInputs = page.getByPlaceholder('Sub-category name')
   await partInputs.nth(1).fill('Coffee')
@@ -124,7 +128,7 @@ test('zoom shows categories, payee split narrows the detail panel', async ({ pag
   await expect(label(page, 'Groceries')).toBeVisible()
   await expect(label(page, 'Rent')).toBeVisible()
   await label(page, 'Groceries').getByRole('button', { name: 'split' }).click()
-  const payeeBox = page.locator('svg text', { hasText: /^Corner Grocer$/ }).first()
+  const payeeBox = page.locator('svg text', { hasText: /^Corner/ }).first()
   await expect(payeeBox).toBeVisible()
   await payeeBox.click({ force: true })
   await expect(page.getByText('· Corner Grocer')).toBeVisible()
