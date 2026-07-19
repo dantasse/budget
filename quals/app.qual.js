@@ -62,10 +62,23 @@ test('recategorizing a transaction in a scenario updates and persists', async ({
   await launchApp(page)
   await createScenario(page, 'qual-scenario')
   const firstSelect = page.locator('tbody select').first()
-  await firstSelect.selectOption({ label: 'Games' })
-  await expect(firstSelect.locator('option:checked')).toHaveText('Games')
+  // options are the depth-indented tree, so select by id
+  await firstSelect.selectOption('c-games')
+  await expect(firstSelect).toHaveValue('c-games')
   await page.reload()
-  await expect(page.locator('tbody select').first().locator('option:checked')).toHaveText('Games')
+  await expect(page.locator('tbody select').first()).toHaveValue('c-games')
+})
+
+test('a transaction can sit on a depth-1 node', async ({ page }) => {
+  await launchApp(page)
+  await createScenario(page, 'qual-scenario')
+  const firstSelect = page.locator('tbody select').first()
+  await firstSelect.selectOption('g2') // the "Fun" category group itself
+  await expect(firstSelect).toHaveValue('g2')
+  await page.getByRole('button', { name: 'Reports' }).click()
+  // its direct spend gets its own table row, with no ancestor path
+  const funRow = page.locator('tr', { hasText: /^Fun/ }).filter({ has: page.getByRole('button', { name: 'hide' }) })
+  await expect(funRow).toBeVisible()
 })
 
 test('drag-merge combines two categories and ungroup reverses it', async ({ page }) => {
@@ -88,7 +101,7 @@ test('drag-merge combines two categories and ungroup reverses it', async ({ page
   await expect(page.locator('svg text', { hasText: /^Games$/ })).toBeVisible()
 })
 
-test('split editor saves a split and the new category appears', async ({ page }) => {
+test('split editor saves a split; parts nest under the source', async ({ page }) => {
   await launchApp(page, '/main/Reports')
   await createScenario(page, 'qual-scenario')
   // treemap texts are pointer-events:none; force dispatches to the cell rect beneath
@@ -100,10 +113,67 @@ test('split editor saves a split and the new category appears', async ({ page })
   await page.locator('div', { hasText: /^Coffee Cart/ }).locator('input[type="checkbox"]').last().check()
   await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
   await page.getByRole('button', { name: 'Save' }).click()
+  // parts are children of Groceries: not at the top level, visible after zooming in
+  await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toHaveCount(0)
+  await label(page, 'Essentials').getByRole('button', { name: 'zoom' }).click()
   await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toBeVisible()
   // the scenario-local category shows up in the transactions dropdown
   await page.getByRole('button', { name: 'Transactions' }).click()
-  await expect(page.locator('tbody select').first().locator('option', { hasText: /^Coffee$/ })).toHaveCount(1)
+  await expect(page.locator('tbody select').first().locator('option', { hasText: /Coffee$/ })).toHaveCount(1)
+})
+
+test('dragging a cell onto another box moves it there', async ({ page }) => {
+  await launchApp(page, '/main/Reports')
+  await createScenario(page, 'qual-scenario')
+  const games = page.locator('svg text', { hasText: /^Games$/ })
+  const rent  = page.locator('svg text', { hasText: /^Rent$/ })
+  const from = await games.boundingBox()
+  const to   = await rent.boundingBox()
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+  await page.mouse.down()
+  // aim below Rent's label: the label hit-zone means merge, the background means move
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height + 30, { steps: 10 })
+  await page.mouse.up()
+  await expect(page.locator('tr', { hasText: 'Games' }).filter({ hasText: 'Essentials' })).toBeVisible()
+})
+
+test('absorb children reverses a split', async ({ page }) => {
+  await launchApp(page, '/main/Reports')
+  await createScenario(page, 'qual-scenario')
+  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
+  await page.getByText('Split...').click()
+  await page.getByPlaceholder('Sub-category name').nth(1).fill('Coffee')
+  await page.locator('div', { hasText: /^Coffee Cart/ }).locator('input[type="checkbox"]').last().check()
+  await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
+  await page.getByRole('button', { name: 'Save' }).click()
+  await expect(page.locator('td', { hasText: /^Coffee$/ })).toBeVisible()
+  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
+  await page.getByText('Absorb children').click()
+  await expect(page.locator('td', { hasText: /^Coffee$/ })).toHaveCount(0)
+})
+
+test('lump and zoom work at any layer', async ({ page }) => {
+  await launchApp(page, '/main/Reports')
+  await createScenario(page, 'qual-scenario')
+  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
+  await page.getByText('Split...').click()
+  await page.getByPlaceholder('Sub-category name').nth(1).fill('Coffee')
+  // an empty part renders no cell, so give Coffee a transaction
+  await page.locator('div', { hasText: /^Coffee Cart/ }).locator('input[type="checkbox"]').last().check()
+  await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
+  await page.getByRole('button', { name: 'Save' }).click()
+  await label(page, 'Essentials').getByRole('button', { name: 'zoom' }).click()
+  await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toBeVisible()
+  // Groceries has children now, so it lumps at level 2
+  await label(page, 'Groceries').getByRole('button', { name: 'lump' }).click()
+  await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toHaveCount(0)
+  await label(page, 'Groceries').getByRole('button', { name: 'split' }).click()
+  // and zooms to level 2; the breadcrumb offers both ancestors
+  await label(page, 'Groceries').getByRole('button', { name: 'zoom' }).click()
+  await expect(label(page, 'Coffee')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Essentials' })).toBeVisible()
+  await page.getByRole('button', { name: 'All', exact: true }).click()
+  await expect(label(page, 'Essentials')).toBeVisible()
 })
 
 test('net-negative categories and lumped groups are listed under the treemap', async ({ page }) => {

@@ -70,7 +70,7 @@ function applyEdits(baseRows, edits) {
 
 function memoEditsKey(budgetId, name)  { return `ynab_memoedits_${budgetId}_${name}` }
 function scenariosListKey(budgetId)    { return `ynab_scenarios_${budgetId}` }
-function catModelKey(budgetId, name)   { return `ynab_catmodel_${budgetId}_${name}` }
+function catModelKey(budgetId, name)   { return `ynab_cattree_${budgetId}_${name}` }
 
 function loadMemoEdits(budgetId, name) {
   try { return JSON.parse(localStorage.getItem(memoEditsKey(budgetId, name))) ?? {} }
@@ -81,13 +81,13 @@ function saveMemoEdits(budgetId, name, edits) {
   localStorage.setItem(memoEditsKey(budgetId, name), JSON.stringify(edits))
 }
 
-// catModel: the scenario's category mapping (see DATA_MODEL.md).
-// cats:   { [catId]: { name, group, splitFrom? } } — overrides for ynab ids, definitions for local ids
-// routes: { [ynabCatId]: catId } — that category's transactions display as catId
-// txCats: { [txKey]: catId } — per-transaction exceptions
-// groups: { [ynabGroupId]: newName } — group renames
-// Invariant: routes/txCats values always point at final, live catIds (ops flatten on write).
-const EMPTY_CAT_MODEL = { cats: {}, routes: {}, txCats: {}, groups: {} }
+// catModel: the scenario's category-tree overlay (see DATA_MODEL.md).
+// nodes:  { [nodeId]: { name?, parentId?, merged? } } — partial overrides for ynab ids
+//         (merged = tombstone: absorbed into routes[id]), full definitions for local ids
+// routes: { [ynabId]: nodeId } — that category's transactions display as nodeId
+// txCats: { [txKey]: nodeId } — per-transaction exceptions
+// Invariant: routes/txCats values always point at live node ids (ops flatten on write).
+const EMPTY_CAT_MODEL = { nodes: {}, routes: {}, txCats: {} }
 
 function loadCatModel(budgetId, name) {
   try {
@@ -100,8 +100,27 @@ function saveCatModel(budgetId, name, model) {
   localStorage.setItem(catModelKey(budgetId, name), JSON.stringify(model))
 }
 
-function localCatId(groupName, name) { return `local:${groupName}:${name}` }
-function isLocalCatId(id) { return id.startsWith('local:') }
+function newLocalId() { return `local:${crypto.randomUUID()}` }
+function isLocalId(id) { return id.startsWith('local:') }
+
+// walks parentIds; true when ancestorId is id or one of its ancestors
+function inSubtree(tree, ancestorId, id) {
+  let cur = tree.byId.get(id)
+  while (cur) {
+    if (cur.id === ancestorId) return true
+    cur = cur.parentId !== null ? tree.byId.get(cur.parentId) : undefined
+  }
+  return false
+}
+
+function descendantIds(tree, id) {
+  const out = []
+  const visit = (nid) => {
+    for (const c of tree.byId.get(nid).childIds) { out.push(c); visit(c) }
+  }
+  visit(id)
+  return out
+}
 
 function isoDate(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -156,45 +175,90 @@ export default function App() {
   const [startDate,        setStartDate]        = useState(defaultStartDate)
   const [endDate,          setEndDate]          = useState(() => isoDate(new Date()))
 
-  // ynabCatInfo: catId → { name, group, groupId } from the YNAB structure
-  const ynabCatInfo = useMemo(() => {
-    const map = new Map()
+  // catTree: the effective category tree = YNAB base + catModel.nodes overlay.
+  // byId: Map<id, { id, name, parentId, childIds, hidden, ynab: 'group'|'category'|null }>
+  // Merge-tombstoned nodes are absent; orphans (parent missing) surface as roots.
+  const catTree = useMemo(() => {
+    const byId = new Map()
     for (const g of categoryGroups) {
-      for (const c of g.categories) map.set(c.id, { name: c.name, group: g.name, groupId: g.id })
+      byId.set(g.id, { id: g.id, name: g.name, parentId: null, hidden: g.hidden, ynab: 'group' })
+      for (const c of g.categories) {
+        byId.set(c.id, { id: c.id, name: c.name, parentId: g.id, hidden: g.hidden || c.hidden, ynab: 'category' })
+      }
     }
-    return map
-  }, [categoryGroups])
+    for (const [id, ov] of Object.entries(catModel.nodes)) {
+      if (ov.merged) { byId.delete(id); continue }
+      const base = byId.get(id)
+      if (base) {
+        byId.set(id, { ...base, name: ov.name ?? base.name, parentId: 'parentId' in ov ? ov.parentId : base.parentId })
+      } else if (isLocalId(id)) {
+        byId.set(id, { id, name: ov.name, parentId: ov.parentId ?? null, hidden: false, ynab: null })
+      }
+      // an override for a ynab id we no longer know (deleted in YNAB) is dropped
+    }
+    const rootIds = []
+    for (const n of byId.values()) n.childIds = []
+    for (const n of byId.values()) {
+      const parent = n.parentId !== null ? byId.get(n.parentId) : undefined
+      parent ? parent.childIds.push(n.id) : rootIds.push(n.id)
+    }
+    return { byId, rootIds }
+  }, [categoryGroups, catModel.nodes])
 
-  // effective definition of a category under a model: override, else YNAB (with group rename applied)
-  function catDef(model, catId) {
-    const override = model.cats[catId]
-    if (override) return override
-    const info = ynabCatInfo.get(catId)
-    if (!info) return null
-    return { name: info.name, group: model.groups[info.groupId] ?? info.group }
-  }
+  // nodePaths: id → array of node names, root → node; missing for unknown ids
+  const nodePaths = useMemo(() => {
+    const cache = new Map()
+    const walk = (id, seen) => {
+      if (cache.has(id)) return cache.get(id)
+      const n = catTree.byId.get(id)
+      if (!n) return undefined
+      if (seen.has(id)) {
+        console.error('category tree cycle at', id)
+        return [n.name]
+      }
+      seen.add(id)
+      const parentPath = n.parentId !== null ? walk(n.parentId, seen) : undefined
+      const path = parentPath ? [...parentPath, n.name] : [n.name]
+      cache.set(id, path)
+      return path
+    }
+    for (const id of catTree.byId.keys()) walk(id, new Set())
+    return cache
+  }, [catTree])
+
+  // ynabNames: original YNAB names, kept for ids no longer in the tree (merge tombstones)
+  const ynabNames = useMemo(() => {
+    const m = new Map()
+    for (const g of categoryGroups) {
+      m.set(g.id, g.name)
+      for (const c of g.categories) m.set(c.id, c.name)
+    }
+    return m
+  }, [categoryGroups])
 
   // allRows: every transaction with memo edits applied and its category resolved
   // through the scenario's catModel; rows: allRows narrowed to the date pickers.
   // Rows leave here final — tabs never re-resolve categories.
   const allRows = useMemo(() => {
     const withMemos = applyEdits(baseRows, memoEdits)
-    const { cats, routes, txCats } = catModel
-    if (Object.keys(cats).length === 0 && Object.keys(routes).length === 0 &&
-        Object.keys(txCats).length === 0 && Object.keys(catModel.groups).length === 0) {
-      return withMemos
-    }
+    const { routes, txCats } = catModel
     return withMemos.map(row => {
       const key = `${row._txId}/${row._subTxId}`
-      const catId = txCats[key] ?? routes[row._categoryId] ?? row._categoryId
-      const def = catDef(catModel, catId)
-      // unknown id (e.g., a hidden YNAB category): keep the row's stamped names
-      if (!def) return row
-      if (catId === row._categoryId && def.name === row['Category'] && def.group === row['Category Group']) return row
-      // _ynabCategoryId preserves the pre-resolution id (used for merge-child totals)
-      return { ...row, _ynabCategoryId: row._categoryId, _categoryId: catId, 'Category': def.name, 'Category Group': def.group }
+      const nodeId = txCats[key] ?? routes[row._categoryId] ?? row._categoryId
+      const path = nodePaths.get(nodeId)
+      // unknown id (e.g., a category deleted in YNAB): keep the row's stamped names
+      if (!path) return row
+      return {
+        ...row,
+        // _ynabCategoryId preserves the pre-resolution id (used for merge-child totals)
+        ...(nodeId !== row._categoryId ? { _ynabCategoryId: row._categoryId } : {}),
+        _categoryId: nodeId,
+        _path: path,
+        'Category Group': path[0],
+        'Category': path.slice(1).join(' / '),
+      }
     })
-  }, [baseRows, memoEdits, catModel, ynabCatInfo])
+  }, [baseRows, memoEdits, catModel, nodePaths])
   // an empty (cleared) date input means that bound is unlimited
   const rows = allRows.filter(r =>
     (!startDate || r['Date'] >= startDate) && (!endDate || r['Date'] <= endDate))
@@ -239,15 +303,17 @@ export default function App() {
             catMap.set(cat.id, { group: group.name, name: cat.name })
           }
         }
+        // hidden groups/categories stay in the tree (flagged) so their
+        // transactions still display; deleted ones are dropped
         setCategoryGroups(
           catData.data.category_groups
-            .filter(g => !g.deleted && !g.hidden)
+            .filter(g => !g.deleted)
             .map(g => ({
               id: g.id,
               name: g.name,
-              categories: g.categories.filter(c => !c.deleted && !c.hidden).map(c => ({ id: c.id, name: c.name })),
+              hidden: g.hidden,
+              categories: g.categories.filter(c => !c.deleted).map(c => ({ id: c.id, name: c.name, hidden: c.hidden })),
             }))
-            .filter(g => g.categories.length > 0)
         )
         const newTxSubsById = new Map()
         for (const tx of txData.data.transactions) {
@@ -315,44 +381,32 @@ export default function App() {
     setUndoStack([])
   }
 
-  const mergedCategoryGroups = useMemo(() => {
-    // the dropdowns' category list: YNAB categories that aren't routed away
-    // (merged/split sources have no identity of their own anymore), with
-    // overrides and group renames applied, plus scenario-local categories
-    const entries = []
-    for (const g of categoryGroups) {
-      for (const c of g.categories) {
-        if (catModel.routes[c.id]) continue
-        const def = catDef(catModel, c.id)
-        entries.push({ id: c.id, name: def.name, group: def.group })
-      }
+  // catOptions: the tree flattened depth-first for the category pickers —
+  // every node at every depth is assignable; hidden YNAB nodes are excluded
+  const catOptions = useMemo(() => {
+    const out = []
+    const visit = (id, depth, ancestors) => {
+      const n = catTree.byId.get(id)
+      const path = [...ancestors, n.name]
+      if (!n.hidden) out.push({ id, name: n.name, depth, path })
+      for (const c of n.childIds) visit(c, depth + 1, path)
     }
-    for (const [id, def] of Object.entries(catModel.cats)) {
-      if (isLocalCatId(id)) entries.push({ id, name: def.name, group: def.group })
-    }
-    const ynabGroupIds = new Map(categoryGroups.map(g => [catModel.groups[g.id] ?? g.name, g.id]))
-    const byGroup = new Map()
-    for (const { id, name, group } of entries) {
-      if (!byGroup.has(group)) {
-        byGroup.set(group, { id: ynabGroupIds.get(group) ?? `local-group:${group}`, name: group, categories: [] })
-      }
-      byGroup.get(group).categories.push({ id, name })
-    }
-    return [...byGroup.values()]
-  }, [categoryGroups, catModel])
+    for (const id of catTree.rootIds) visit(id, 0, [])
+    return out
+  }, [catTree])
 
-  // mergeChildren: parent display name → [{ id, name }] of YNAB categories merged into it
-  // (split routes are excluded — their targets carry splitFrom pointing back at the source)
+  // mergeChildren: live node id → [{ id, name }] of YNAB nodes merged into it
+  // (split routes don't appear: they target a child of the source, no tombstone)
   const mergeChildren = useMemo(() => {
     const byParent = new Map()
-    for (const [from, into] of Object.entries(catModel.routes)) {
-      if (catModel.cats[into]?.splitFrom === from) continue
-      const parentName = catDef(catModel, into)?.name ?? into
-      if (!byParent.has(parentName)) byParent.set(parentName, [])
-      byParent.get(parentName).push({ id: from, name: ynabCatInfo.get(from)?.name ?? from })
+    for (const [id, ov] of Object.entries(catModel.nodes)) {
+      if (!ov.merged) continue
+      const into = catModel.routes[id]
+      if (!byParent.has(into)) byParent.set(into, [])
+      byParent.get(into).push({ id, name: ynabNames.get(id) ?? id })
     }
     return byParent
-  }, [catModel, ynabCatInfo])
+  }, [catModel, ynabNames])
 
   function buildSplitBody(txId, changedSubIds, patch) {
     const allSubs = txSubsById.current.get(txId) ?? []
@@ -443,108 +497,109 @@ export default function App() {
     return () => document.removeEventListener('keydown', handler)
   }, [handleUndo])
 
-  const renameCategory = (catId, newName) => {
+  const renameNode = (id, newName) => {
     const trimmed = newName.trim()
     if (!trimmed) return
     applyCatOp(undefined, model => {
-      const def = catDef(model, catId)
-      if (!def || def.name === trimmed) return model
-      return { ...model, cats: { ...model.cats, [catId]: { ...def, name: trimmed } } }
+      const node = catTree.byId.get(id)
+      if (!node || node.name === trimmed) return model
+      return { ...model, nodes: { ...model.nodes, [id]: { ...model.nodes[id], name: trimmed } } }
     })
   }
 
-  const moveCategory = (catId, newGroupName) => {
-    applyCatOp('group move', model => {
-      const def = catDef(model, catId)
-      if (!def || def.group === newGroupName) return model
-      return { ...model, cats: { ...model.cats, [catId]: { ...def, group: newGroupName } } }
-    })
-  }
-
-  const renameGroup = (originalName, newName) => {
-    const trimmed = newName.trim()
-    if (!trimmed || trimmed === originalName) return
-    applyCatOp(undefined, model => {
-      const groups = { ...model.groups }
-      for (const g of categoryGroups) {
-        if ((model.groups[g.id] ?? g.name) === originalName) groups[g.id] = trimmed
+  // newParentId null = make the node a root
+  const moveNode = (id, newParentId) => {
+    applyCatOp('move', model => {
+      const node = catTree.byId.get(id)
+      if (!node || node.parentId === newParentId || id === newParentId) return model
+      if (newParentId !== null && !catTree.byId.has(newParentId)) return model
+      if (newParentId !== null && inSubtree(catTree, id, newParentId)) {
+        setError(`Can't move “${node.name}” into its own subtree.`)
+        return model
       }
-      const cats = { ...model.cats }
-      for (const [id, def] of Object.entries(model.cats)) {
-        if (def.group === originalName) cats[id] = { ...def, group: trimmed }
-      }
-      return { ...model, groups, cats }
+      return { ...model, nodes: { ...model.nodes, [id]: { ...model.nodes[id], parentId: newParentId } } }
     })
   }
 
-  const mergeCategory = (fromId, intoId) => {
-    if (fromId === intoId) return
+  const mergeNode = (fromId, intoId) => {
     applyCatOp('merge', model => {
+      const from = catTree.byId.get(fromId)
+      if (!from || fromId === intoId || !catTree.byId.has(intoId)) return model
+      if (inSubtree(catTree, fromId, intoId)) {
+        setError(`Can't merge “${from.name}” into its own subtree.`)
+        return model
+      }
+      const nodes = { ...model.nodes }
+      for (const childId of from.childIds) {
+        nodes[childId] = { ...nodes[childId], parentId: intoId }
+      }
       const routes = { ...model.routes }
       const txCats = { ...model.txCats }
       // flatten: anything pointing at fromId now points at intoId
       for (const [k, v] of Object.entries(routes)) if (v === fromId) routes[k] = intoId
       for (const [k, v] of Object.entries(txCats)) if (v === fromId) txCats[k] = intoId
-      const cats = { ...model.cats }
-      delete cats[fromId]
-      if (!isLocalCatId(fromId)) routes[fromId] = intoId
-      return { ...model, routes, txCats, cats }
+      if (isLocalId(fromId)) delete nodes[fromId]
+      else { nodes[fromId] = { merged: true }; routes[fromId] = intoId }
+      return { nodes, routes, txCats }
     })
   }
 
-  const unmergeCategory = (fromId) => {
+  const unmergeNode = (fromId) => {
     applyCatOp(undefined, model => {
-      if (!model.routes[fromId]) return model
+      if (!model.nodes[fromId]?.merged) return model
+      const nodes = { ...model.nodes }
+      delete nodes[fromId]
       const routes = { ...model.routes }
       delete routes[fromId]
-      return { ...model, routes }
+      return { ...model, nodes, routes }
     })
   }
 
-  const applySplit = (sourceId, validParts, assignments) => {
+  const splitNode = (sourceId, partNames, assignments) => {
     // assignments: { [txKey]: partIdx }; unassigned rows (and future
-    // transactions) follow the route to part 0
+    // transactions) follow the route to part 0. Parts become children of the
+    // source, which stays in the tree as their parent.
     applyCatOp('split', model => {
-      const def = catDef(model, sourceId)
-      if (!def) return model
-      const group = def.group
-      const origin = model.cats[sourceId]?.splitFrom ?? sourceId
-      const originName = model.cats[sourceId]?.splitFromName ?? ynabCatInfo.get(origin)?.name ?? def.name
-      const partIds = validParts.map(p => localCatId(group, p))
-      const cats = { ...model.cats }
-      validParts.forEach((name, i) => { cats[partIds[i]] = { name, group, splitFrom: origin, splitFromName: originName } })
+      const source = catTree.byId.get(sourceId)
+      if (!source) return model
+      const partIds = partNames.map(() => newLocalId())
+      const nodes = { ...model.nodes }
+      partNames.forEach((name, i) => { nodes[partIds[i]] = { name, parentId: sourceId } })
       const routes = { ...model.routes }
       const txCats = { ...model.txCats }
       // flatten: anything pointing at the source now points at part 0
       for (const [k, v] of Object.entries(routes)) if (v === sourceId) routes[k] = partIds[0]
       for (const [k, v] of Object.entries(txCats)) if (v === sourceId) txCats[k] = partIds[0]
-      if (isLocalCatId(sourceId)) delete cats[sourceId]
-      else routes[sourceId] = partIds[0]
+      // only ynab categories appear as raw transaction category ids; group/local
+      // sources receive transactions via routes/txCats only (rewritten above)
+      if (source.ynab === 'category') routes[sourceId] = partIds[0]
       for (const [key, partIdx] of Object.entries(assignments)) {
         if (partIdx > 0 && partIds[partIdx]) txCats[key] = partIds[partIdx]
       }
-      return { ...model, cats, routes, txCats }
+      return { nodes, routes, txCats }
     })
   }
 
-  const removeSplit = (origin) => {
-    applyCatOp(undefined, model => {
-      const partSet = new Set(
-        Object.entries(model.cats).filter(([, d]) => d.splitFrom === origin).map(([id]) => id))
-      if (partSet.size === 0) return model
-      const cats = { ...model.cats }
-      for (const id of partSet) delete cats[id]
+  // the inverse of split, generalized: every descendant merges into the node
+  // (local descendants deleted, ynab descendants tombstoned + routed)
+  const absorbChildren = (id) => {
+    applyCatOp('absorb', model => {
+      const node = catTree.byId.get(id)
+      if (!node || node.childIds.length === 0) return model
+      const desc = new Set(descendantIds(catTree, id))
+      const nodes = { ...model.nodes }
       const routes = {}
       for (const [k, v] of Object.entries(model.routes)) {
-        if (partSet.has(k)) continue
-        const target = partSet.has(v) ? origin : v
-        if (k !== target) routes[k] = target
+        const target = desc.has(v) ? id : v
+        if (k !== target) routes[k] = target // a route from the node to one of its own parts folds away
       }
       const txCats = {}
-      for (const [k, v] of Object.entries(model.txCats)) {
-        if (!partSet.has(v)) txCats[k] = v
+      for (const [k, v] of Object.entries(model.txCats)) txCats[k] = desc.has(v) ? id : v
+      for (const d of desc) {
+        if (isLocalId(d)) delete nodes[d]
+        else { nodes[d] = { merged: true }; routes[d] = id }
       }
-      return { ...model, cats, routes, txCats }
+      return { nodes, routes, txCats }
     })
   }
 
@@ -556,17 +611,28 @@ export default function App() {
     })
   }
 
+  // after a live PATCH, any txCats override for those keys is stale (it would
+  // shadow the new live category) and gets dropped
+  const clearTxCats = (keys) => {
+    if (!keys.some(k => k in catModel.txCats)) return
+    applyCatOp(undefined, model => {
+      const txCats = { ...model.txCats }
+      for (const k of keys) delete txCats[k]
+      return { ...model, txCats }
+    })
+  }
+
   const updateCategory = async (txId, subTxId, newCategoryId) => {
     if (activeScenario === MAIN && !editLiveData) return
     const key = `${txId}/${subTxId}`
 
-    if (activeScenario !== MAIN) {
+    // only a real YNAB category can be PATCHed live; other nodes (local,
+    // depth-1) have no YNAB equivalent and go through main's catModel
+    if (activeScenario !== MAIN || catTree.byId.get(newCategoryId)?.ynab !== 'category') {
       recategorizeTx([key], newCategoryId)
       return
     }
 
-    const info = ynabCatInfo.get(newCategoryId)
-    const rowPatch = { _categoryId: newCategoryId, 'Category Group': info?.group ?? '', 'Category': info?.name ?? '' }
     const apiPatch = { category_id: newCategoryId }
     const body = subTxId
       ? buildSplitBody(txId, new Set([subTxId]), apiPatch)
@@ -577,8 +643,9 @@ export default function App() {
       setBaseRows(prev => prev.map(row => {
         if (row._txId !== txId) return row
         if (subTxId !== null && row._subTxId !== subTxId) return row
-        return { ...row, ...rowPatch }
+        return { ...row, _categoryId: newCategoryId }
       }))
+      clearTxCats([key])
     } catch (e) {
       setError(e.message)
     }
@@ -587,14 +654,12 @@ export default function App() {
   const bulkUpdateCategory = async (rowKeys, newCategoryId) => {
     if (activeScenario === MAIN && !editLiveData) return
 
-    if (activeScenario !== MAIN) {
+    if (activeScenario !== MAIN || catTree.byId.get(newCategoryId)?.ynab !== 'category') {
       recategorizeTx(rowKeys, newCategoryId)
       return
     }
 
     const keySet = new Set(rowKeys)
-    const info = ynabCatInfo.get(newCategoryId)
-    const rowPatch = { _categoryId: newCategoryId, 'Category Group': info?.group ?? '', 'Category': info?.name ?? '' }
     const selected = baseRows.filter(r => keySet.has(`${r._txId}/${r._subTxId}`))
     const nonSplit  = selected.filter(r => r._subTxId === null)
     const split     = selected.filter(r => r._subTxId !== null)
@@ -620,8 +685,9 @@ export default function App() {
       for (const [txId, subIds] of splitByTx) applySubsUpdate(txId, subIds, apiPatch)
       setBaseRows(prev => prev.map(row => {
         if (!keySet.has(`${row._txId}/${row._subTxId}`)) return row
-        return { ...row, ...rowPatch }
+        return { ...row, _categoryId: newCategoryId }
       }))
+      clearTxCats(rowKeys)
     } catch (e) {
       setError(e.message)
     }
@@ -756,8 +822,8 @@ export default function App() {
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        {activeTab === 'Transactions' && <TransactionsTab rows={rows} categoryGroups={mergedCategoryGroups} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
-        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} budgetId={selectedBudgetId} scenario={activeScenario} categoryGroups={mergedCategoryGroups} catModel={catModel} mergeChildren={mergeChildren} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameGroup={renameGroup} onRenameCategory={renameCategory} onMoveCategory={moveCategory} onMergeCategory={mergeCategory} onUnmergeCategory={unmergeCategory} onApplySplit={applySplit} onRemoveSplit={removeSplit} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
+        {activeTab === 'Transactions' && <TransactionsTab rows={rows} catOptions={catOptions} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
+        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} budgetId={selectedBudgetId} scenario={activeScenario} catTree={catTree} catOptions={catOptions} mergeChildren={mergeChildren} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameNode={renameNode} onMoveNode={moveNode} onMergeNode={mergeNode} onUnmergeNode={unmergeNode} onSplitNode={splitNode} onAbsorbChildren={absorbChildren} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
       </div>
     </div>
   )

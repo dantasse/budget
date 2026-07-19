@@ -43,7 +43,7 @@ function parseMoney(val) {
   return parseFloat(val.replace(/[$,]/g, '')) || 0
 }
 
-function CategoryCombobox({ categoryGroups, onSelect, disabled, inputRef }) {
+function CategoryCombobox({ catOptions, onSelect, disabled, inputRef }) {
   const [value,            setValue]            = useState('')
   const [open,             setOpen]             = useState(false)
   const [highlightedIndex, setHighlightedIndex] = useState(-1)
@@ -58,11 +58,7 @@ function CategoryCombobox({ categoryGroups, onSelect, disabled, inputRef }) {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  const filtered = categoryGroups
-    .map(g => ({ ...g, categories: g.categories.filter(c => c.name.toLowerCase().includes(value.toLowerCase())) }))
-    .filter(g => g.categories.length > 0)
-
-  const flatCats = filtered.flatMap(g => g.categories)
+  const flatCats = catOptions.filter(o => o.path.join(' / ').toLowerCase().includes(value.toLowerCase()))
 
   useEffect(() => {
     if (highlightedIndex < 0 || !listRef.current) return
@@ -111,35 +107,28 @@ function CategoryCombobox({ categoryGroups, onSelect, disabled, inputRef }) {
         disabled={disabled}
         style={{ padding: '3px 6px', fontSize: '13px', width: '200px' }}
       />
-      {open && filtered.length > 0 && (
+      {open && flatCats.length > 0 && (
         <div ref={listRef} style={{
           position: 'absolute', top: '100%', left: 0, zIndex: 100,
           background: '#fff', border: '1px solid #ccc', borderRadius: '4px',
           boxShadow: '0 4px 12px rgba(0,0,0,0.15)', maxHeight: '300px',
           overflowY: 'auto', minWidth: '220px',
         }}>
-          {filtered.map(group => (
-            <div key={group.id}>
-              <div style={{ padding: '4px 10px', fontSize: '11px', color: '#999', fontWeight: 600, textTransform: 'uppercase', background: '#f8f8f8' }}>
-                {group.name}
-              </div>
-              {group.categories.map(cat => {
-                const idx = flatCats.indexOf(cat)
-                return (
-                  <div
-                    key={cat.id}
-                    data-idx={idx}
-                    onMouseDown={() => handleSelect(cat)}
-                    onMouseEnter={() => setHighlightedIndex(idx)}
-                    style={{
-                      padding: '6px 14px', cursor: 'pointer', fontSize: '13px',
-                      background: highlightedIndex === idx ? '#f0f4ff' : '',
-                    }}
-                  >
-                    {cat.name}
-                  </div>
-                )
-              })}
+          {flatCats.map((cat, idx) => (
+            <div
+              key={cat.id}
+              data-idx={idx}
+              onMouseDown={() => handleSelect(cat)}
+              onMouseEnter={() => setHighlightedIndex(idx)}
+              style={{
+                padding: '6px 14px', cursor: 'pointer', fontSize: '13px',
+                background: highlightedIndex === idx ? '#f0f4ff' : '',
+              }}
+            >
+              {cat.path.length > 1 && (
+                <span style={{ color: '#999' }}>{cat.path.slice(0, -1).join(' / ')} / </span>
+              )}
+              {cat.name}
             </div>
           ))}
         </div>
@@ -148,11 +137,13 @@ function CategoryCombobox({ categoryGroups, onSelect, disabled, inputRef }) {
   )
 }
 
-function CategorySelect({ row, categoryGroups, onUpdateCategory, updating }) {
+function CategorySelect({ row, catOptions, onUpdateCategory, updating }) {
   const handleChange = (e) => {
     const newId = e.target.value
     if (newId !== row._categoryId) onUpdateCategory(row._txId, row._subTxId, newId)
   }
+
+  const known = catOptions.some(o => o.id === row._categoryId)
 
   return (
     <select
@@ -170,12 +161,12 @@ function CategorySelect({ row, categoryGroups, onUpdateCategory, updating }) {
         opacity: updating ? 0.5 : 1,
       }}
     >
-      {categoryGroups.map(group => (
-        <optgroup key={group.id} label={group.name}>
-          {group.categories.map(cat => (
-            <option key={cat.id} value={cat.id}>{cat.name}</option>
-          ))}
-        </optgroup>
+      {/* current value not in the picker (hidden/unknown category): show it, unselectable elsewhere */}
+      {!known && (
+        <option value={row._categoryId ?? ''}>{row['Category'] || row['Category Group'] || '—'}</option>
+      )}
+      {catOptions.map(o => (
+        <option key={o.id} value={o.id}>{'   '.repeat(o.depth) + o.name}</option>
       ))}
     </select>
   )
@@ -247,7 +238,7 @@ function ResizableHeader({ colKey, width, onResize, onSort, sortDir, children })
   )
 }
 
-export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, hiddenCols = [], columnLabels = {}, columnValues = {}, onSelectedChange }) {
+export default function TransactionsTab({ rows, catOptions, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, hiddenCols = [], columnLabels = {}, columnValues = {}, onSelectedChange }) {
   const [search,           setSearch]           = useState('')
   const [colWidths,        setColWidths]        = useState(DEFAULT_WIDTHS)
   const [sort,             setSort]             = useState({ key: 'Date', dir: 'desc' })
@@ -423,7 +414,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
         )}
         <span style={{ color: '#555', fontSize: '13px' }}>Reassign to:</span>
         <CategoryCombobox
-          categoryGroups={categoryGroups}
+          catOptions={catOptions}
           onSelect={handleBulkCategorySelect}
           disabled={bulkBusy || selectedIds.size === 0}
           inputRef={comboboxInputRef}
@@ -499,7 +490,7 @@ export default function TransactionsTab({ rows, categoryGroups, onUpdateCategory
                         {key === 'Category'
                           ? <CategorySelect
                               row={row}
-                              categoryGroups={categoryGroups}
+                              catOptions={catOptions}
                               onUpdateCategory={handleUpdateCategory}
                               updating={updatingIds.has(rowKey(row))}
                             />
