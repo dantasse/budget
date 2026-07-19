@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import TransactionsTab from './TransactionsTab'
 import ReportsTab from './ReportsTab'
+import CategoriesTab from './CategoriesTab'
 
-const TABS = ['Transactions', 'Reports']
+const TABS = ['Transactions', 'Reports', 'Categories']
 const API  = 'https://api.ynab.com/v1'
 const MAIN = 'main'
 
@@ -823,6 +824,7 @@ export default function App() {
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {activeTab === 'Transactions' && <TransactionsTab rows={rows} catOptions={catOptions} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
+        {activeTab === 'Categories'   && <CategoriesTab   catTree={catTree} rows={rows} onMoveNode={moveNode} />}
         {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} budgetId={selectedBudgetId} scenario={activeScenario} catTree={catTree} catOptions={catOptions} mergeChildren={mergeChildren} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameNode={renameNode} onMoveNode={moveNode} onMergeNode={mergeNode} onUnmergeNode={unmergeNode} onSplitNode={splitNode} onAbsorbChildren={absorbChildren} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
       </div>
     </div>

@@ -162,7 +162,17 @@ a hide toggle, and merge-child subrows (from `mergeChildren`, totals via
 
 The split editor's in-progress state (`editingSplit`, with the Naive Bayes
 payee classifier) is in-memory only; Save converts it into a `splitNode` op.
-It operates on the rows sitting *directly* on the source node.
+It operates on the rows sitting *directly* on the source node. It opens from a
+leaf box's "split" button, a cell's context menu, or the detail panel; part 0
+(the remainder that unassigned/future transactions follow) starts named
+"Other", so both parts read as children of the source rather than a copy of it.
+
+## The Categories tab
+
+Renders the effective tree as an indented list with subtree totals (hidden
+YNAB nodes greyed). Dragging a row onto another row re-parents it there
+(`moveNode`, whole subtree comes along); dropping on the "Top level" bar makes
+it a root. No other state — it's a direct view of `catTree`.
 
 ## Undo
 

@@ -251,7 +251,7 @@ export default function ReportsTab({ rows, budgetId, scenario, catTree, catOptio
 
   const toggleLump = useCallback((id) => {
     const wasLumped = lumpedIds.has(id)
-    onPushUndo({ label: wasLumped ? 'split' : 'lump', scope: 'reports', undo: () => setLumpedIds(prev => {
+    onPushUndo({ label: wasLumped ? 'unlump' : 'lump', scope: 'reports', undo: () => setLumpedIds(prev => {
       const next = new Set(prev)
       wasLumped ? next.add(id) : next.delete(id)
       return next
@@ -265,7 +265,7 @@ export default function ReportsTab({ rows, budgetId, scenario, catTree, catOptio
 
   const togglePayeeSplit = useCallback((id) => {
     const wasSplit = payeeSplitIds.has(id)
-    onPushUndo({ label: wasSplit ? 'lump' : 'split', scope: 'reports', undo: () => setPayeeSplitIds(prev => {
+    onPushUndo({ label: wasSplit ? 'payees off' : 'payees', scope: 'reports', undo: () => setPayeeSplitIds(prev => {
       const next = new Set(prev)
       wasSplit ? next.add(id) : next.delete(id)
       return next
@@ -490,7 +490,9 @@ export default function ReportsTab({ rows, budgetId, scenario, catTree, catOptio
     if (!sourceName) return
     let assignments  = {}
     const manualKeys = new Set()
-    const parts      = [sourceName, '']
+    // both parts become child categories of the source; part 0 (the remainder
+    // that unassigned/future transactions follow) starts as "Other"
+    const parts      = ['Other', '']
     if (preassignedKeys && preassignedKeys.size > 0) {
       for (const k of preassignedKeys) {
         assignments[k] = 1
@@ -810,7 +812,7 @@ export default function ReportsTab({ rows, budgetId, scenario, catTree, catOptio
                           onMouseDown={e => e.stopPropagation()}
                           style={OVERLAY_BTN_STYLE}
                         >
-                          {lumpedIds.has(_id) ? 'split' : 'lump'}
+                          {lumpedIds.has(_id) ? 'unlump' : 'lump'}
                         </button>
                         <button
                           onClick={e => { e.stopPropagation(); startZoom(_id) }}
@@ -821,13 +823,23 @@ export default function ReportsTab({ rows, budgetId, scenario, catTree, catOptio
                         </button>
                       </>
                     ) : (
-                      <button
-                        onClick={e => { e.stopPropagation(); togglePayeeSplit(_id) }}
-                        onMouseDown={e => e.stopPropagation()}
-                        style={OVERLAY_BTN_STYLE}
-                      >
-                        {payeeSplitIds.has(_id) ? 'lump' : 'split'}
-                      </button>
+                      <>
+                        {/* split = the real op: carve out child subcategories */}
+                        <button
+                          onClick={e => { e.stopPropagation(); openSplitEditor(_id) }}
+                          onMouseDown={e => e.stopPropagation()}
+                          style={OVERLAY_BTN_STYLE}
+                        >
+                          split
+                        </button>
+                        <button
+                          onClick={e => { e.stopPropagation(); togglePayeeSplit(_id) }}
+                          onMouseDown={e => e.stopPropagation()}
+                          style={{ ...OVERLAY_BTN_STYLE, ...(payeeSplitIds.has(_id) ? { background: 'rgba(255,255,255,0.85)', color: '#333' } : {}) }}
+                        >
+                          payees
+                        </button>
+                      </>
                     )}
                   </span>
                 )}
@@ -846,7 +858,7 @@ export default function ReportsTab({ rows, budgetId, scenario, catTree, catOptio
               {name}{boxName !== name && <span style={{ color: '#aaa' }}> · {boxName}</span>} ({`-${dollarFormatter(-value)}`})
               {isLumpSelf && (
                 <button onClick={() => toggleLump(boxId)} style={SMALL_BTN_STYLE}>
-                  split
+                  unlump
                 </button>
               )}
             </span>

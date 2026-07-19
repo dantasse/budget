@@ -39,7 +39,7 @@ test('lump collapses a group and undo restores it', async ({ page }) => {
   // the lumped cell shows only its total; the title lives in the group-label overlay
   await expect(page.locator('svg text', { hasText: /^Essentials/ })).toHaveCount(0)
   await expect(page.locator('svg text', { hasText: /^\$1,888$/ })).toBeVisible()
-  await expect(label(page, 'Essentials').getByRole('button', { name: 'split' })).toBeVisible()
+  await expect(label(page, 'Essentials').getByRole('button', { name: 'unlump' })).toBeVisible()
   await page.keyboard.press('ControlOrMeta+z')
   await expect(page.locator('svg text', { hasText: /^Groc/ })).toBeVisible()
 })
@@ -167,7 +167,7 @@ test('lump and zoom work at any layer', async ({ page }) => {
   // Groceries has children now, so it lumps at level 2
   await label(page, 'Groceries').getByRole('button', { name: 'lump' }).click()
   await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toHaveCount(0)
-  await label(page, 'Groceries').getByRole('button', { name: 'split' }).click()
+  await label(page, 'Groceries').getByRole('button', { name: 'unlump' }).click()
   // and zooms to level 2; the breadcrumb offers both ancestors
   await label(page, 'Groceries').getByRole('button', { name: 'zoom' }).click()
   await expect(label(page, 'Coffee')).toBeVisible()
@@ -188,7 +188,7 @@ test('net-negative categories and lumped groups are listed under the treemap', a
   await label(page, 'Custom').getByRole('button', { name: 'lump' }).click()
   await expect(page.locator('svg text', { hasText: /^Transfer$/ })).toHaveCount(0)
   await expect(bar).toContainText('Custom (-$400)')
-  await bar.getByRole('button', { name: 'split' }).click()
+  await bar.getByRole('button', { name: 'unlump' }).click()
   await expect(page.locator('svg text', { hasText: /^Transfer$/ })).toBeVisible()
 })
 
@@ -197,9 +197,44 @@ test('zoom shows categories, payee split narrows the detail panel', async ({ pag
   await label(page, 'Essentials').getByRole('button', { name: 'zoom' }).click()
   await expect(label(page, 'Groceries')).toBeVisible()
   await expect(label(page, 'Rent')).toBeVisible()
-  await label(page, 'Groceries').getByRole('button', { name: 'split' }).click()
+  await label(page, 'Groceries').getByRole('button', { name: 'payees' }).click()
   const payeeBox = page.locator('svg text', { hasText: /^Corner/ }).first()
   await expect(payeeBox).toBeVisible()
   await payeeBox.click({ force: true })
   await expect(page.getByText('· Corner Grocer')).toBeVisible()
+})
+
+test('leaf split button opens the editor and creates child categories', async ({ page }) => {
+  await launchApp(page, '/main/Reports')
+  await createScenario(page, 'qual-scenario')
+  await label(page, 'Essentials').getByRole('button', { name: 'zoom' }).click()
+  await label(page, 'Groceries').getByRole('button', { name: 'split' }).click()
+  await expect(page.getByText('Split:')).toBeVisible()
+  // part 0 defaults to "Other" so both parts are real children, not a same-named copy
+  await expect(page.getByPlaceholder('Sub-category name').nth(0)).toHaveValue('Other')
+  await page.getByPlaceholder('Sub-category name').nth(1).fill('Coffee')
+  await page.locator('div', { hasText: /^Coffee Cart/ }).locator('input[type="checkbox"]').last().check()
+  await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
+  await page.getByRole('button', { name: 'Save' }).click()
+  // the Groceries box now shows its level-3 subcategories, not payees
+  await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toBeVisible()
+  await expect(page.locator('svg text', { hasText: /^Other$/ })).toBeVisible()
+})
+
+test('categories tab drag re-parents a node', async ({ page }) => {
+  await launchApp(page, '/main/Categories')
+  await createScenario(page, 'qual-scenario')
+  const games = page.locator('[data-node-id="c-games"]')
+  await expect(games).toHaveAttribute('data-parent-id', 'g2')
+  const target = page.locator('[data-node-id="g1"]')
+  const from = await games.boundingBox()
+  const to   = await target.boundingBox()
+  await page.mouse.move(from.x + 20, from.y + from.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(to.x + 20, to.y + to.height / 2, { steps: 8 })
+  await page.mouse.up()
+  await expect(page.locator('[data-node-id="c-games"]')).toHaveAttribute('data-parent-id', 'g1')
+  // undo restores the old parent
+  await page.keyboard.press('ControlOrMeta+z')
+  await expect(page.locator('[data-node-id="c-games"]')).toHaveAttribute('data-parent-id', 'g2')
 })
