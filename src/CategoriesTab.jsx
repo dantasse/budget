@@ -16,10 +16,13 @@ const ROOT = '__root__'
 
 // The category hierarchy as an indented tree; drag a row onto another row to
 // re-parent it (with its whole subtree), or onto the top bar to make it a root.
-export default function CategoriesTab({ catTree, rows, onMoveNode }) {
+// Clicking a name edits it in place.
+export default function CategoriesTab({ catTree, rows, onMoveNode, onRenameNode }) {
   const tree = catTree.byId
   const [dragId,  setDragId]  = useState(null)
   const [hoverId, setHoverId] = useState(null) // hovered drop target: node id, or ROOT
+  const [editing, setEditing] = useState(null) // { id, value } | null
+  const [collapsedIds, setCollapsedIds] = useState(new Set()) // subtrees folded shut (in-memory)
 
   useEffect(() => {
     if (!dragId) return
@@ -62,11 +65,19 @@ export default function CategoriesTab({ catTree, rows, onMoveNode }) {
     const visit = (id, depth) => {
       const n = tree.get(id)
       out.push({ id, depth, name: n.name, hidden: n.hidden, parentId: n.parentId, hasChildren: n.childIds.length > 0 })
+      if (collapsedIds.has(id)) return
       for (const c of n.childIds) visit(c, depth + 1)
     }
     for (const r of catTree.rootIds) visit(r, 0)
     return out
-  }, [catTree])
+  }, [catTree, collapsedIds])
+
+  const toggleCollapsed = (id) =>
+    setCollapsedIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
 
   const drop = (targetId) => {
     if (dragId !== null && dragId !== targetId) onMoveNode(dragId, targetId)
@@ -114,8 +125,34 @@ export default function CategoriesTab({ catTree, rows, onMoveNode }) {
               outlineOffset: '-2px',
             }}
           >
-            <span style={{ color: '#bbb', fontSize: '11px' }}>{hasChildren ? '▾' : '·'}</span>
-            <span style={{ fontWeight: hasChildren ? 600 : 400, color: '#2c3e50' }}>{name}</span>
+            <span
+              onMouseDown={e => e.stopPropagation()}
+              onClick={hasChildren ? () => toggleCollapsed(id) : undefined}
+              style={{ color: hasChildren ? '#888' : '#bbb', fontSize: '11px', width: '12px', textAlign: 'center', cursor: hasChildren ? 'pointer' : 'default', flexShrink: 0 }}
+            >
+              {hasChildren ? (collapsedIds.has(id) ? '▸' : '▾') : '·'}
+            </span>
+            {editing?.id === id ? (
+              <input
+                autoFocus
+                value={editing.value}
+                onChange={e => setEditing(prev => ({ ...prev, value: e.target.value }))}
+                onMouseDown={e => e.stopPropagation()}
+                onBlur={() => { onRenameNode(id, editing.value); setEditing(null) }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter')  { onRenameNode(id, editing.value); setEditing(null) }
+                  if (e.key === 'Escape') setEditing(null)
+                }}
+                style={{ fontSize: '13px', fontWeight: hasChildren ? 600 : 400, color: '#2c3e50', fontFamily: 'inherit', border: 'none', outline: 'none', borderBottom: '1px solid #2980b9', background: 'transparent', padding: 0, width: '180px' }}
+              />
+            ) : (
+              <span
+                onClick={() => setEditing({ id, value: name })}
+                style={{ fontWeight: hasChildren ? 600 : 400, color: '#2c3e50', cursor: 'text' }}
+              >
+                {name}
+              </span>
+            )}
             {hidden && <span style={{ fontSize: '11px', color: '#999' }}>(hidden in YNAB)</span>}
             <span style={{ marginLeft: 'auto', color: '#777' }}>{dollarFormatter(subtreeTotal(id))}</span>
           </div>

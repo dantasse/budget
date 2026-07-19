@@ -167,7 +167,12 @@ export default function App() {
   // app-wide undo stack; entries: { label?, scope, key?, undo }
   // scope: 'edits' (scenario edits) | 'reports' | 'splitEditor' — the latter two are pruned by ReportsTab
   const [undoStack,        setUndoStack]        = useState([])
-  const [loading,          setLoading]          = useState(false)
+  // count of in-flight loads: the budgets fetch and the transactions/categories
+  // fetch overlap, so a boolean would go false when the first one settles
+  const [loadingCount,     setLoadingCount]     = useState(0)
+  const loading = loadingCount > 0
+  // bumped by Connect so the fetch effects re-run even when the token is unchanged
+  const [connectCount,     setConnectCount]     = useState(0)
   const [error,            setError]            = useState(null)
   // URL path is /{scenario}/{tab}; consumed once on initial budget load, then null.
   const urlPathRef = useRef(parsePath())
@@ -266,17 +271,17 @@ export default function App() {
 
   useEffect(() => {
     if (!token) return
-    setLoading(true)
+    setLoadingCount(c => c + 1)
     setError(null)
     apiFetch('/budgets', token)
       .then(({ data }) => setBudgets(data.budgets))
       .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [token])
+      .finally(() => setLoadingCount(c => c - 1))
+  }, [token, connectCount])
 
   useEffect(() => {
     if (!token || !selectedBudgetId) return
-    setLoading(true)
+    setLoadingCount(c => c + 1)
     setError(null)
     const loadedScenarios = loadScenariosList(selectedBudgetId)
     setScenarios(loadedScenarios)
@@ -327,8 +332,8 @@ export default function App() {
         setBaseRows(toRows(txData.data.transactions, catMap))
       })
       .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [token, selectedBudgetId])
+      .finally(() => setLoadingCount(c => c - 1))
+  }, [token, selectedBudgetId, connectCount])
 
   useEffect(() => {
     if (!selectedBudgetId) return
@@ -342,6 +347,7 @@ export default function App() {
     if (!t) return
     localStorage.setItem('ynab_token', t)
     setToken(t)
+    setConnectCount(c => c + 1)
     setBaseRows([])
     setBudgets([])
   }
@@ -824,8 +830,8 @@ export default function App() {
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {activeTab === 'Transactions' && <TransactionsTab rows={rows} catOptions={catOptions} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
-        {activeTab === 'Categories'   && <CategoriesTab   catTree={catTree} rows={rows} onMoveNode={moveNode} />}
-        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} budgetId={selectedBudgetId} scenario={activeScenario} catTree={catTree} catOptions={catOptions} mergeChildren={mergeChildren} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameNode={renameNode} onMoveNode={moveNode} onMergeNode={mergeNode} onUnmergeNode={unmergeNode} onSplitNode={splitNode} onAbsorbChildren={absorbChildren} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
+        {activeTab === 'Categories'   && <CategoriesTab   catTree={catTree} rows={rows} onMoveNode={moveNode} onRenameNode={renameNode} />}
+        {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} loading={loading} budgetId={selectedBudgetId} scenario={activeScenario} catTree={catTree} catOptions={catOptions} mergeChildren={mergeChildren} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameNode={renameNode} onMoveNode={moveNode} onMergeNode={mergeNode} onUnmergeNode={unmergeNode} onSplitNode={splitNode} onAbsorbChildren={absorbChildren} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
       </div>
     </div>
   )

@@ -109,7 +109,7 @@ function classifyAll(rows, assignments, manualKeys, numParts) {
 
 const round2 = (v) => Math.round(v * 100) / 100
 
-export default function ReportsTab({ rows, budgetId, scenario, catTree, catOptions, mergeChildren, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameNode, onMoveNode, onMergeNode, onUnmergeNode, onSplitNode, onAbsorbChildren, onPushUndo, onRemoveUndos }) {
+export default function ReportsTab({ rows, loading, budgetId, scenario, catTree, catOptions, mergeChildren, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameNode, onMoveNode, onMergeNode, onUnmergeNode, onSplitNode, onAbsorbChildren, onPushUndo, onRemoveUndos }) {
   // all view state is node-id-keyed; the old name-keyed keys are abandoned
   const hiddenKey = `ynab_report_hiddennodes_${budgetId}_${scenario}`
   const lumpsKey  = `ynab_report_lumpnodes_${budgetId}_${scenario}`
@@ -682,7 +682,7 @@ export default function ReportsTab({ rows, budgetId, scenario, catTree, catOptio
   }
 
   if (rows.length === 0) return (
-    <div style={{ color: '#555', padding: '24px 0' }}>No data loaded.</div>
+    <div style={{ color: '#555', padding: '24px 0' }}>{loading ? 'Loading…' : 'No data loaded.'}</div>
   )
 
   // the header total is scoped to the current zoom; the table's Share column

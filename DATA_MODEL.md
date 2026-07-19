@@ -172,7 +172,9 @@ leaf box's "split" button, a cell's context menu, or the detail panel; part 0
 Renders the effective tree as an indented list with subtree totals (hidden
 YNAB nodes greyed). Dragging a row onto another row re-parents it there
 (`moveNode`, whole subtree comes along); dropping on the "Top level" bar makes
-it a root. No other state — it's a direct view of `catTree`.
+it a root. Clicking a name renames it (`renameNode`); the ▾/▸ arrow collapses
+or expands a subtree (in-memory only). Otherwise it's a direct view of
+`catTree`.
 
 ## Undo
 

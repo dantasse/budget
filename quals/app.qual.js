@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { launchApp, createScenario } from './fixtures.js'
+import { launchApp, createScenario, BUDGETS, TRANSACTIONS, CATEGORIES } from './fixtures.js'
 
 const label = (page, name) => page.locator(`[data-label-for="${name}"]`)
 
@@ -237,4 +237,57 @@ test('categories tab drag re-parents a node', async ({ page }) => {
   // undo restores the old parent
   await page.keyboard.press('ControlOrMeta+z')
   await expect(page.locator('[data-node-id="c-games"]')).toHaveAttribute('data-parent-id', 'g2')
+})
+
+test('categories tab renames a node in place', async ({ page }) => {
+  await launchApp(page, '/main/Categories')
+  await createScenario(page, 'qual-scenario')
+  await page.locator('[data-node-id="c-restaurants"]').getByText('Restaurants').click()
+  const input = page.locator('[data-node-id="c-restaurants"] input')
+  await input.fill('Dining')
+  await input.press('Enter')
+  await expect(page.locator('[data-node-id="c-restaurants"]')).toContainText('Dining')
+  await page.reload()
+  await expect(page.locator('[data-node-id="c-restaurants"]')).toContainText('Dining')
+})
+
+test('clicking Connect with an unchanged token reloads the data', async ({ page }) => {
+  // regression: same-token setToken was a state no-op, so the fetch effects
+  // never re-ran after Connect cleared budgets/baseRows
+  await launchApp(page)
+  await expect(page.getByText('Landlord LLC').first()).toBeVisible()
+  await page.getByRole('button', { name: 'Connect' }).click()
+  await expect(page.getByText('Landlord LLC').first()).toBeVisible()
+})
+
+test('reports shows Loading… (not No data loaded) while fetching', async ({ page }) => {
+  let release
+  const gate = new Promise(r => { release = r })
+  await page.route('https://api.ynab.com/v1/budgets', r => r.fulfill({ json: BUDGETS }))
+  await page.route('https://api.ynab.com/v1/budgets/b1/transactions**', async r => {
+    await gate
+    await r.fulfill({ json: TRANSACTIONS })
+  })
+  await page.route('https://api.ynab.com/v1/budgets/b1/categories', r => r.fulfill({ json: CATEGORIES }))
+  await page.addInitScript(() => {
+    localStorage.setItem('ynab_token', 'qual-token')
+    localStorage.setItem('ynab_budget_id', 'b1')
+  })
+  await page.goto('/main/Reports')
+  // the tab body message plus the app-level banner
+  await expect(page.getByText('Loading…')).toHaveCount(2)
+  await expect(page.getByText('No data loaded.')).toHaveCount(0)
+  release()
+  await expect(label(page, 'Essentials')).toBeVisible()
+})
+
+test('categories tab arrows collapse and expand a subtree', async ({ page }) => {
+  await launchApp(page, '/main/Categories')
+  await expect(page.locator('[data-node-id="c-groceries"]')).toBeVisible()
+  await page.locator('[data-node-id="g1"] span').first().click()
+  await expect(page.locator('[data-node-id="c-groceries"]')).toHaveCount(0)
+  // other groups are unaffected
+  await expect(page.locator('[data-node-id="c-restaurants"]')).toBeVisible()
+  await page.locator('[data-node-id="g1"] span').first().click()
+  await expect(page.locator('[data-node-id="c-groceries"]')).toBeVisible()
 })
