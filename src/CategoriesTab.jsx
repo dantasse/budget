@@ -17,7 +17,7 @@ const ROOT = '__root__'
 // The category hierarchy as an indented tree; drag a row onto another row to
 // re-parent it (with its whole subtree), or onto the top bar to make it a root.
 // Clicking a name edits it in place.
-export default function CategoriesTab({ catTree, rows, onMoveNode, onRenameNode }) {
+export default function CategoriesTab({ catTree, rows, onMoveNode, onRenameNode, onDeleteNode }) {
   const tree = catTree.byId
   const [dragId,  setDragId]  = useState(null)
   const [hoverId, setHoverId] = useState(null) // hovered drop target: node id, or ROOT
@@ -155,6 +155,13 @@ export default function CategoriesTab({ catTree, rows, onMoveNode, onRenameNode 
             )}
             {hidden && <span style={{ fontSize: '11px', color: '#999' }}>(hidden in YNAB)</span>}
             <span style={{ marginLeft: 'auto', color: '#777' }}>{dollarFormatter(subtreeTotal(id))}</span>
+            <button
+              onMouseDown={e => e.stopPropagation()}
+              onClick={() => onDeleteNode(id)}
+              style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #bbb', borderRadius: '3px', background: '#f4f4f4', color: '#555' }}
+            >
+              delete
+            </button>
           </div>
         )
       })}

@@ -11,6 +11,14 @@ test('transactions tab renders fixture rows', async ({ page }) => {
   await expect(page.getByText('Ancient Payee')).toHaveCount(0)
 })
 
+test('transactions category column shows the full path', async ({ page }) => {
+  await launchApp(page)
+  await expect(page.getByText('Category Group')).toHaveCount(0)
+  // rows sort by date desc; the newest fixture tx (Corner Grocer) is in Essentials → Groceries
+  await expect(page.locator('tbody select').first().locator('option').first())
+    .toHaveText('Essentials → Groceries')
+})
+
 test('date pickers widen and narrow the visible rows', async ({ page }) => {
   await launchApp(page)
   await expect(page.getByText('Landlord LLC').first()).toBeVisible()
@@ -120,6 +128,23 @@ test('split editor saves a split; parts nest under the source', async ({ page })
   // the scenario-local category shows up in the transactions dropdown
   await page.getByRole('button', { name: 'Transactions' }).click()
   await expect(page.locator('tbody select').first().locator('option', { hasText: /Coffee$/ })).toHaveCount(1)
+  // the category column shows the full path down to the new part
+  await expect(page.locator('tr', { hasText: 'Coffee Cart' }).locator('option').first())
+    .toHaveText('Essentials → Groceries → Coffee')
+})
+
+test('splitter automatic mode assigns all rows with the same payee', async ({ page }) => {
+  await launchApp(page, '/main/Reports')
+  await createScenario(page, 'qual-scenario')
+  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
+  await page.getByText('Split...').click()
+  // assign one of the two Corner Grocer transactions ($25); the other ($40) follows by payee
+  // anchored to the full row text: an unanchored /^Corner Grocer/ also matches the column container
+  await page.locator('div', { hasText: /^Corner Grocer\s*[\d-]+\s*25\.00$/ }).locator('input[type="checkbox"]').check()
+  await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
+  // part totals: both Corner Grocer txs ($65) moved; Farm Stand + Coffee Cart ($23) stayed in part 0
+  await expect(page.getByText(/^\$65\s*2 transactions$/)).toBeVisible()
+  await expect(page.getByText(/^\$23\s*2 transactions$/)).toBeVisible()
 })
 
 test('dragging a cell onto another box moves it there', async ({ page }) => {
@@ -279,6 +304,34 @@ test('reports shows Loading… (not No data loaded) while fetching', async ({ pa
   await expect(page.getByText('No data loaded.')).toHaveCount(0)
   release()
   await expect(label(page, 'Essentials')).toBeVisible()
+})
+
+test('deleting a category keeps its transactions stamped and out of reports; undo restores it', async ({ page }) => {
+  await launchApp(page, '/main/Categories')
+  await createScenario(page, 'qual-scenario')
+  await page.locator('[data-node-id="c-games"]').getByRole('button', { name: 'delete' }).click()
+  await expect(page.locator('[data-node-id="c-games"]')).toHaveCount(0)
+  // its transactions keep the stamped YNAB path in the transactions view
+  await page.getByRole('button', { name: 'Transactions' }).click()
+  await expect(page.locator('tr', { hasText: 'Game Shop' }).locator('option').first())
+    .toHaveText('Fun → Games')
+  // and reports skip them
+  await page.getByRole('button', { name: 'Reports' }).click()
+  await expect(page.locator('svg text', { hasText: /^Games/ })).toHaveCount(0)
+  await page.keyboard.press('ControlOrMeta+z')
+  await expect(page.locator('svg text', { hasText: /^Games/ })).toBeVisible()
+})
+
+test('deleting a group removes its whole subtree and persists', async ({ page }) => {
+  await launchApp(page, '/main/Categories')
+  await createScenario(page, 'qual-scenario')
+  await page.locator('[data-node-id="g2"]').getByRole('button', { name: 'delete' }).click()
+  await expect(page.locator('[data-node-id="g2"]')).toHaveCount(0)
+  await expect(page.locator('[data-node-id="c-games"]')).toHaveCount(0)
+  await expect(page.locator('[data-node-id="c-restaurants"]')).toHaveCount(0)
+  await page.reload()
+  await expect(page.locator('[data-node-id="g1"]')).toBeVisible()
+  await expect(page.locator('[data-node-id="g2"]')).toHaveCount(0)
 })
 
 test('categories tab arrows collapse and expand a subtree', async ({ page }) => {

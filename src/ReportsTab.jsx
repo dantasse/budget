@@ -55,17 +55,11 @@ function CustomTooltip({ active, payload }) {
   )
 }
 
-function tokenize(str) {
-  return (str ?? '').toLowerCase().split(/[\W_]+/).filter(w => w.length > 1)
-}
-
-// Classifies non-manual rows using manual examples as training data.
-// Fast path: exact payee match → majority class among same-payee manual examples.
-// Fallback: Naive Bayes on payee tokens with a pseudocount prior so it works
-// from the very first drag (no requirement for examples in every class).
+// Classifies non-manual rows using manual examples: a row goes to the majority
+// class among same-payee manual examples; a payee with no manual example gets
+// no assignment (defaults to part 0).
 function classifyAll(rows, assignments, manualKeys, numParts) {
   if (manualKeys.size === 0) return null
-  const classDocs = Array.from({ length: numParts }, () => ({ words: {}, total: 0, n: 0 }))
   const payeeTally = new Map() // payee_lower → count per class
   for (const row of rows) {
     const key = `${row._txId}/${row._subTxId}`
@@ -74,35 +68,15 @@ function classifyAll(rows, assignments, manualKeys, numParts) {
     const payee = (row['Payee'] ?? '').trim().toLowerCase()
     if (!payeeTally.has(payee)) payeeTally.set(payee, Array(numParts).fill(0))
     payeeTally.get(payee)[ci]++
-    classDocs[ci].n++
-    for (const w of tokenize(row['Payee'])) {
-      classDocs[ci].words[w] = (classDocs[ci].words[w] ?? 0) + 1
-      classDocs[ci].total++
-    }
   }
-  const totalManual = classDocs.reduce((s, d) => s + d.n, 0)
-  const vocab = new Set(classDocs.flatMap(d => Object.keys(d.words)))
-  const vocabSize = vocab.size || 1
-  // pseudocount of 0.5 per class so NB works even when some classes have 0 examples
-  const pseudo = 0.5
   const next = { ...assignments }
   for (const row of rows) {
     const key = `${row._txId}/${row._subTxId}`
     if (manualKeys.has(key)) continue
     const payee = (row['Payee'] ?? '').trim().toLowerCase()
     const tally = payeeTally.get(payee)
-    if (tally) {
-      // exact payee match: assign to whichever class has the most manual examples
-      next[key] = tally.indexOf(Math.max(...tally))
-      continue
-    }
-    const words = tokenize(row['Payee'])
-    const scores = classDocs.map(d => {
-      let s = Math.log((d.n + pseudo) / (totalManual + pseudo * numParts))
-      for (const w of words) s += Math.log(((d.words[w] ?? 0) + 1) / (d.total + vocabSize))
-      return s
-    })
-    next[key] = scores.indexOf(Math.max(...scores))
+    if (tally) next[key] = tally.indexOf(Math.max(...tally))
+    else delete next[key]
   }
   return next
 }

@@ -6,8 +6,7 @@ const COLUMNS = [
   { key: 'Account',        defaultWidth: 180 },
   { key: 'Date',           defaultWidth: 100 },
   { key: 'Payee',          defaultWidth: 140 },
-  { key: 'Category Group', defaultWidth: 180 },
-  { key: 'Category',       defaultWidth: 200 },
+  { key: 'Category',       defaultWidth: 300 },
   { key: 'Memo',           defaultWidth: 160 },
   { key: 'Outflow',        defaultWidth: 90  },
   { key: 'Inflow',         defaultWidth: 90  },
@@ -143,8 +142,6 @@ function CategorySelect({ row, catOptions, onUpdateCategory, updating }) {
     if (newId !== row._categoryId) onUpdateCategory(row._txId, row._subTxId, newId)
   }
 
-  const known = catOptions.some(o => o.id === row._categoryId)
-
   return (
     <select
       value={row._categoryId ?? ''}
@@ -161,10 +158,9 @@ function CategorySelect({ row, catOptions, onUpdateCategory, updating }) {
         opacity: updating ? 0.5 : 1,
       }}
     >
-      {/* current value not in the picker (hidden/unknown category): show it, unselectable elsewhere */}
-      {!known && (
-        <option value={row._categoryId ?? ''}>{row['Category'] || row['Category Group'] || '—'}</option>
-      )}
+      {/* the row's value labeled with its full path — a select displays the first
+          option matching its value; this also covers hidden/unknown categories */}
+      <option value={row._categoryId ?? ''}>{row['Category'] || '—'}</option>
       {catOptions.map(o => (
         <option key={o.id} value={o.id}>{'   '.repeat(o.depth) + o.name}</option>
       ))}

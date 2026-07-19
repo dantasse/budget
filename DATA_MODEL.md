@@ -1,7 +1,7 @@
 # Data model
 
-Last verified against the code: 2026-07-18 (arbitrary-depth category tree). If
-you change any layer below, update this file.
+Last verified against the code: 2026-07-19 (delete op, single Category path
+column). If you change any layer below, update this file.
 
 ## Layer 0: YNAB (source of truth)
 
@@ -24,14 +24,16 @@ you change any layer below, update this file.
 
 `toRows()` flattens transactions: **one row per transaction or subtransaction**.
 Row key = `` `${_txId}/${_subTxId}` `` (`_subTxId` null for non-split). Fields:
-`_categoryId`, `Account`, `Date`, `Payee`, `Category Group`, `Category`, `Memo`,
+`_categoryId`, `Account`, `Date`, `Payee`, `Category`, `Memo`,
 `Outflow`/`Inflow` (dollar strings from milliunits; exactly one nonzero).
+`Category` is the full path joined with " → " (stamped as "group → name" from
+YNAB; empty for uncategorized transactions).
 
 After resolution (Layer 2) each row also carries `_path` (array of node names,
-root → resolved node). `Category Group` = `_path[0]`; `Category` = the rest of
-the path joined with " / " (empty for a transaction sitting directly on a
-depth-1 node). Rows whose category id is unknown to the tree keep their
-YNAB-stamped names and have no `_path`; reports skip them.
+root → resolved node) and `Category` = `_path` joined with " → ". Rows whose
+category id is unknown to the tree (deleted in YNAB, or `deleteNode`d in the
+scenario) keep their YNAB-stamped `Category` and have no `_path`; reports skip
+them.
 
 Money convention everywhere: `netSpend(row) = Outflow − Inflow`. Displayed
 "Spending" numbers are net.
@@ -44,7 +46,7 @@ changelog), persisted at `localStorage.ynab_cattree_{budgetId}_{scenario}`:
 
 ```js
 {
-  nodes:  { [nodeId]: { name?, parentId?, merged? } },
+  nodes:  { [nodeId]: { name?, parentId?, merged?, deleted? } },
   routes: { [ynabCatId]: nodeId },  // that category's transactions display as nodeId
   txCats: { [txKey]: nodeId },      // per-transaction exceptions
 }
@@ -57,7 +59,9 @@ changelog), persisted at `localStorage.ynab_cattree_{budgetId}_{scenario}`:
     anywhere in the tree, including to `null` = top level), or
     `merged: true` (a tombstone: this node was absorbed into another node and
     no longer exists in the tree; always paired with a `routes` entry saying
-    where its transactions went).
+    where its transactions went), or `deleted: true` (a tombstone with no
+    destination: the node was deleted and its transactions resolve to an
+    unknown id).
   - For a local id (`local:{uuid}`): the full definition `{ name, parentId }`.
     Local nodes are created by splits (and can then be renamed/moved like any
     node).
@@ -96,6 +100,12 @@ changelog), persisted at `localStorage.ynab_cattree_{budgetId}_{scenario}`:
     of `id` merges into `id` (local descendants deleted, YNAB descendants
     tombstoned + routed). This is "remove split", and also works as a
     permanent lump of any subtree.
+  - `deleteNode(id)` — removes the node and its whole subtree from the tree
+    (local descendants dropped outright, YNAB ids tombstoned `deleted: true`);
+    `routes`/`txCats` pointing into the subtree are removed (a `merged`
+    tombstone routed there becomes `deleted` too). The subtree's transactions
+    revert to their raw YNAB ids — unknown to the tree, so they keep their
+    stamped `Category` in Transactions and drop out of reports.
   - `recategorizeTx(keys, nodeId)` — per-transaction `txCats` entries; a
     transaction can be put on any node (this beats `routes`, so a split
     parent can still hold direct transactions).
@@ -160,8 +170,10 @@ The table below lists every node that holds transactions directly (its
 a hide toggle, and merge-child subrows (from `mergeChildren`, totals via
 `_ynabCategoryId`).
 
-The split editor's in-progress state (`editingSplit`, with the Naive Bayes
-payee classifier) is in-memory only; Save converts it into a `splitNode` op.
+The split editor's in-progress state (`editingSplit`, with automatic
+assignment: a non-manual row follows the majority part among the manual
+examples sharing its payee; payees with no manual example stay on part 0) is
+in-memory only; Save converts it into a `splitNode` op.
 It operates on the rows sitting *directly* on the source node. It opens from a
 leaf box's "split" button, a cell's context menu, or the detail panel; part 0
 (the remainder that unassigned/future transactions follow) starts named
@@ -172,7 +184,8 @@ leaf box's "split" button, a cell's context menu, or the detail panel; part 0
 Renders the effective tree as an indented list with subtree totals (hidden
 YNAB nodes greyed). Dragging a row onto another row re-parents it there
 (`moveNode`, whole subtree comes along); dropping on the "Top level" bar makes
-it a root. Clicking a name renames it (`renameNode`); the ▾/▸ arrow collapses
+it a root. Clicking a name renames it (`renameNode`); each row has a "delete"
+button (`deleteNode`, undoable like any op); the ▾/▸ arrow collapses
 or expands a subtree (in-memory only). Otherwise it's a direct view of
 `catTree`.
 

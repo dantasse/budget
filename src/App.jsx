@@ -50,8 +50,7 @@ function toRows(transactions, catMap) {
         'Account':        tx.account_name ?? '',
         'Date':           tx.date,
         'Payee':          tx.payee_name ?? '',
-        'Category Group': cat.group,
-        'Category':       cat.name,
+        'Category':       [cat.group, cat.name].filter(Boolean).join(' → '),
         'Memo':           memo ?? '',
         'Outflow':        amount < 0 ? (Math.abs(amount) / 1000).toFixed(2) : '0.00',
         'Inflow':         amount > 0 ? (amount / 1000).toFixed(2) : '0.00',
@@ -83,8 +82,9 @@ function saveMemoEdits(budgetId, name, edits) {
 }
 
 // catModel: the scenario's category-tree overlay (see DATA_MODEL.md).
-// nodes:  { [nodeId]: { name?, parentId?, merged? } } — partial overrides for ynab ids
-//         (merged = tombstone: absorbed into routes[id]), full definitions for local ids
+// nodes:  { [nodeId]: { name?, parentId?, merged?, deleted? } } — partial overrides for ynab ids
+//         (merged = tombstone: absorbed into routes[id]; deleted = tombstone with
+//         no destination), full definitions for local ids
 // routes: { [ynabId]: nodeId } — that category's transactions display as nodeId
 // txCats: { [txKey]: nodeId } — per-transaction exceptions
 // Invariant: routes/txCats values always point at live node ids (ops flatten on write).
@@ -183,7 +183,7 @@ export default function App() {
 
   // catTree: the effective category tree = YNAB base + catModel.nodes overlay.
   // byId: Map<id, { id, name, parentId, childIds, hidden, ynab: 'group'|'category'|null }>
-  // Merge-tombstoned nodes are absent; orphans (parent missing) surface as roots.
+  // Tombstoned (merged/deleted) nodes are absent; orphans (parent missing) surface as roots.
   const catTree = useMemo(() => {
     const byId = new Map()
     for (const g of categoryGroups) {
@@ -193,7 +193,7 @@ export default function App() {
       }
     }
     for (const [id, ov] of Object.entries(catModel.nodes)) {
-      if (ov.merged) { byId.delete(id); continue }
+      if (ov.merged || ov.deleted) { byId.delete(id); continue }
       const base = byId.get(id)
       if (base) {
         byId.set(id, { ...base, name: ov.name ?? base.name, parentId: 'parentId' in ov ? ov.parentId : base.parentId })
@@ -260,8 +260,7 @@ export default function App() {
         ...(nodeId !== row._categoryId ? { _ynabCategoryId: row._categoryId } : {}),
         _categoryId: nodeId,
         _path: path,
-        'Category Group': path[0],
-        'Category': path.slice(1).join(' / '),
+        'Category': path.join(' → '),
       }
     })
   }, [baseRows, memoEdits, catModel, nodePaths])
@@ -610,6 +609,33 @@ export default function App() {
     })
   }
 
+  // removes the node and its whole subtree. Their transactions revert to their
+  // raw YNAB category, which is tombstoned and so unknown to the tree: they keep
+  // their stamped names in Transactions and are skipped by Reports.
+  const deleteNode = (id) => {
+    applyCatOp('delete', model => {
+      if (!catTree.byId.has(id)) return model
+      const idSet = new Set([id, ...descendantIds(catTree, id)])
+      const nodes = { ...model.nodes }
+      const routes = {}
+      for (const [k, v] of Object.entries(model.routes)) {
+        if (idSet.has(k) || idSet.has(v)) {
+          // a category merged into the deleted subtree goes down with it
+          if (nodes[k]?.merged) nodes[k] = { deleted: true }
+          continue
+        }
+        routes[k] = v
+      }
+      const txCats = {}
+      for (const [k, v] of Object.entries(model.txCats)) if (!idSet.has(v)) txCats[k] = v
+      for (const d of idSet) {
+        if (isLocalId(d)) delete nodes[d]
+        else nodes[d] = { deleted: true }
+      }
+      return { nodes, routes, txCats }
+    })
+  }
+
   const recategorizeTx = (keys, catId) => {
     applyCatOp(undefined, model => {
       const txCats = { ...model.txCats }
@@ -830,7 +856,7 @@ export default function App() {
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {activeTab === 'Transactions' && <TransactionsTab rows={rows} catOptions={catOptions} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
-        {activeTab === 'Categories'   && <CategoriesTab   catTree={catTree} rows={rows} onMoveNode={moveNode} onRenameNode={renameNode} />}
+        {activeTab === 'Categories'   && <CategoriesTab   catTree={catTree} rows={rows} onMoveNode={moveNode} onRenameNode={renameNode} onDeleteNode={deleteNode} />}
         {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} loading={loading} budgetId={selectedBudgetId} scenario={activeScenario} catTree={catTree} catOptions={catOptions} mergeChildren={mergeChildren} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameNode={renameNode} onMoveNode={moveNode} onMergeNode={mergeNode} onUnmergeNode={unmergeNode} onSplitNode={splitNode} onAbsorbChildren={absorbChildren} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
       </div>
     </div>
