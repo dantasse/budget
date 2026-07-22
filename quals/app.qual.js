@@ -83,7 +83,7 @@ test('a transaction can sit on a depth-1 node', async ({ page }) => {
   const firstSelect = page.locator('tbody select').first()
   await firstSelect.selectOption('g2') // the "Fun" category group itself
   await expect(firstSelect).toHaveValue('g2')
-  await page.getByRole('button', { name: 'Reports' }).click()
+  await page.getByRole('button', { name: 'Reports', exact: true }).click()
   // its direct spend gets its own table row, with no ancestor path
   const funRow = page.locator('tr', { hasText: /^Fun/ }).filter({ has: page.getByRole('button', { name: 'hide' }) })
   await expect(funRow).toBeVisible()
@@ -316,7 +316,7 @@ test('deleting a category keeps its transactions stamped and out of reports; und
   await expect(page.locator('tr', { hasText: 'Game Shop' }).locator('option').first())
     .toHaveText('Fun → Games')
   // and reports skip them
-  await page.getByRole('button', { name: 'Reports' }).click()
+  await page.getByRole('button', { name: 'Reports', exact: true }).click()
   await expect(page.locator('svg text', { hasText: /^Games/ })).toHaveCount(0)
   await page.keyboard.press('ControlOrMeta+z')
   await expect(page.locator('svg text', { hasText: /^Games/ })).toBeVisible()
@@ -332,6 +332,58 @@ test('deleting a group removes its whole subtree and persists', async ({ page })
   await page.reload()
   await expect(page.locator('[data-node-id="g1"]')).toBeVisible()
   await expect(page.locator('[data-node-id="g2"]')).toHaveCount(0)
+})
+
+test('Reports2 payee buckets moves a payee into a new child category', async ({ page }) => {
+  await launchApp(page, '/main/Reports2')
+  await createScenario(page, 'qual-scenario')
+  await page.getByTitle('source category').selectOption('c-groceries')
+  await page.getByRole('button', { name: /^Corner Grocer/ }).click()
+  await page.getByRole('button', { name: '+ New subcategory' }).click()
+  await page.getByPlaceholder('New category name').fill('Stores')
+  await page.getByRole('button', { name: 'Move 1 here' }).click()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await page.getByRole('button', { name: 'Transactions' }).click()
+  await expect(page.locator('tr', { hasText: 'Corner Grocer' }).first().locator('option').first())
+    .toHaveText('Essentials → Groceries → Stores')
+})
+
+test('Reports3 search & carve creates a sibling category from matches', async ({ page }) => {
+  await launchApp(page, '/main/Reports3')
+  await createScenario(page, 'qual-scenario')
+  await page.getByTitle('source category').selectOption('c-groceries')
+  await page.getByPlaceholder('Search payee or memo…').fill('coffee')
+  await expect(page.getByText('1 transactions match, $8')).toBeVisible()
+  await page.getByPlaceholder('New category name').fill('Coffee')
+  await page.getByLabel(/sibling/).check()
+  await page.getByRole('button', { name: 'Carve out' }).click()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await page.getByRole('button', { name: 'Transactions' }).click()
+  await expect(page.locator('tr', { hasText: 'Coffee Cart' }).locator('option').first())
+    .toHaveText('Essentials → Coffee')
+})
+
+test('Reports4 triage deck deals payees largest-first into buckets', async ({ page }) => {
+  await launchApp(page, '/main/Reports4')
+  await createScenario(page, 'qual-scenario')
+  await page.getByTitle('source category').selectOption('c-groceries')
+  // largest payee first: Corner Grocer ($65) → new bucket
+  await expect(page.getByText('Corner Grocer')).toBeVisible()
+  await page.getByRole('button', { name: '+ New bucket' }).click()
+  await page.getByPlaceholder('New category name').fill('Stores')
+  await page.getByRole('button', { name: 'Create & assign' }).click()
+  // Farm Stand ($15) → same bucket; Coffee Cart ($8) → keep in Groceries
+  await expect(page.getByText('Farm Stand')).toBeVisible()
+  await page.getByRole('button', { name: /^Stores/ }).click()
+  await expect(page.getByText('Coffee Cart')).toBeVisible()
+  await page.getByRole('button', { name: /^Keep in Groceries/ }).click()
+  await expect(page.getByText('All payees triaged — hit Save.')).toBeVisible()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await page.getByRole('button', { name: 'Transactions' }).click()
+  await expect(page.locator('tr', { hasText: 'Farm Stand' }).locator('option').first())
+    .toHaveText('Essentials → Groceries → Stores')
+  await expect(page.locator('tr', { hasText: 'Coffee Cart' }).locator('option').first())
+    .toHaveText('Essentials → Groceries')
 })
 
 test('categories tab arrows collapse and expand a subtree', async ({ page }) => {

@@ -109,6 +109,11 @@ changelog), persisted at `localStorage.ynab_cattree_{budgetId}_{scenario}`:
   - `recategorizeTx(keys, nodeId)` — per-transaction `txCats` entries; a
     transaction can be put on any node (this beats `routes`, so a split
     parent can still hold direct transactions).
+  - `addCategoryParts(sourceId, parts)` — used by the Reports2/3/4 split
+    prototypes. Each part `{ name, placement, txKeys }` becomes a new local
+    node (`placement` 'child' = under the source, 'sibling' = under the
+    source's parent) with `txCats` entries for its `txKeys`. No `routes` are
+    written: unassigned and future transactions stay on the source.
 - **Memo edits** are the only remaining per-row patches:
   `localStorage.ynab_memoedits_{budgetId}_{scenario}`, applied before resolution.
 - Edit routing: non-main → catModel/memoEdits. Main + "Edit live data": a
@@ -178,6 +183,23 @@ It operates on the rows sitting *directly* on the source node. It opens from a
 leaf box's "split" button, a cell's context menu, or the detail panel; part 0
 (the remainder that unassigned/future transactions follow) starts named
 "Other", so both parts read as children of the source rather than a copy of it.
+
+## Prototype tabs: Reports2 / Reports3 / Reports4
+
+Three throwaway explorations of the "split a category into subcategories"
+interaction (`Reports2.jsx`/`Reports3.jsx`/`Reports4.jsx`, shared bits in
+`protoCommon.jsx`). Each picks a source category, works on the rows sitting
+directly on it (current date range only), offers a per-part child/sibling
+choice, and saves through `addCategoryParts`:
+
+- **Reports2 "payee buckets"**: payees as chips with counts/totals; select
+  chips and move them into named buckets.
+- **Reports3 "search & carve"**: live payee/memo search over the remainder;
+  each query's matches carve out into a named category.
+- **Reports4 "triage deck"**: payees dealt one at a time (largest first) with
+  sample transactions; assign by click or number key, `k` keeps, `u` undoes.
+
+One (or none) of these will replace the split editor; delete the rest.
 
 ## The Categories tab
 

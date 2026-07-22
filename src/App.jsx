@@ -2,8 +2,11 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import TransactionsTab from './TransactionsTab'
 import ReportsTab from './ReportsTab'
 import CategoriesTab from './CategoriesTab'
+import Reports2Tab from './Reports2'
+import Reports3Tab from './Reports3'
+import Reports4Tab from './Reports4'
 
-const TABS = ['Transactions', 'Reports', 'Categories']
+const TABS = ['Transactions', 'Reports', 'Reports2', 'Reports3', 'Reports4', 'Categories']
 const API  = 'https://api.ynab.com/v1'
 const MAIN = 'main'
 
@@ -609,6 +612,25 @@ export default function App() {
     })
   }
 
+  // op for the Reports2/3/4 split prototypes: create new categories and move
+  // whole transactions onto them. parts: [{ name, placement, txKeys }];
+  // placement 'child' puts the part under the source, 'sibling' beside it.
+  // Unassigned transactions just stay on the source — no forced "Other" part.
+  const addCategoryParts = (sourceId, parts) => {
+    applyCatOp('split', model => {
+      const source = catTree.byId.get(sourceId)
+      if (!source || parts.length === 0) return model
+      const nodes = { ...model.nodes }
+      const txCats = { ...model.txCats }
+      for (const { name, placement, txKeys } of parts) {
+        const id = newLocalId()
+        nodes[id] = { name, parentId: placement === 'sibling' ? source.parentId : sourceId }
+        for (const k of txKeys) txCats[k] = id
+      }
+      return { ...model, nodes, txCats }
+    })
+  }
+
   // removes the node and its whole subtree. Their transactions revert to their
   // raw YNAB category, which is tombstoned and so unknown to the tree: they keep
   // their stamped names in Transactions and are skipped by Reports.
@@ -857,6 +879,9 @@ export default function App() {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {activeTab === 'Transactions' && <TransactionsTab rows={rows} catOptions={catOptions} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} />}
         {activeTab === 'Categories'   && <CategoriesTab   catTree={catTree} rows={rows} onMoveNode={moveNode} onRenameNode={renameNode} onDeleteNode={deleteNode} />}
+        {activeTab === 'Reports2'     && <Reports2Tab     rows={rows} catTree={catTree} catOptions={catOptions} onAddParts={addCategoryParts} opsEnabled={activeScenario !== MAIN || editLiveData} />}
+        {activeTab === 'Reports3'     && <Reports3Tab     rows={rows} catTree={catTree} catOptions={catOptions} onAddParts={addCategoryParts} opsEnabled={activeScenario !== MAIN || editLiveData} />}
+        {activeTab === 'Reports4'     && <Reports4Tab     rows={rows} catTree={catTree} catOptions={catOptions} onAddParts={addCategoryParts} opsEnabled={activeScenario !== MAIN || editLiveData} />}
         {activeTab === 'Reports'      && <ReportsTab      key={`${selectedBudgetId}_${activeScenario}`} rows={rows} loading={loading} budgetId={selectedBudgetId} scenario={activeScenario} catTree={catTree} catOptions={catOptions} mergeChildren={mergeChildren} onUpdateCategory={updateCategory} onBulkUpdateCategory={bulkUpdateCategory} onUpdateMemo={updateMemo} isMainScenario={activeScenario === MAIN} onRenameNode={renameNode} onMoveNode={moveNode} onMergeNode={mergeNode} onUnmergeNode={unmergeNode} onSplitNode={splitNode} onAbsorbChildren={absorbChildren} onPushUndo={pushUndo} onRemoveUndos={removeUndos} />}
       </div>
     </div>
