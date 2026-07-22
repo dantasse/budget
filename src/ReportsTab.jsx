@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { Treemap, ResponsiveContainer, Tooltip } from 'recharts'
 import TransactionsTab from './TransactionsTab'
+import SplitEditor from './SplitEditor'
 
 function parseMoney(val) {
   if (!val) return 0
@@ -55,35 +56,9 @@ function CustomTooltip({ active, payload }) {
   )
 }
 
-// Classifies non-manual rows using manual examples: a row goes to the majority
-// class among same-payee manual examples; a payee with no manual example gets
-// no assignment (defaults to part 0).
-function classifyAll(rows, assignments, manualKeys, numParts) {
-  if (manualKeys.size === 0) return null
-  const payeeTally = new Map() // payee_lower → count per class
-  for (const row of rows) {
-    const key = `${row._txId}/${row._subTxId}`
-    if (!manualKeys.has(key)) continue
-    const ci = assignments[key] ?? 0
-    const payee = (row['Payee'] ?? '').trim().toLowerCase()
-    if (!payeeTally.has(payee)) payeeTally.set(payee, Array(numParts).fill(0))
-    payeeTally.get(payee)[ci]++
-  }
-  const next = { ...assignments }
-  for (const row of rows) {
-    const key = `${row._txId}/${row._subTxId}`
-    if (manualKeys.has(key)) continue
-    const payee = (row['Payee'] ?? '').trim().toLowerCase()
-    const tally = payeeTally.get(payee)
-    if (tally) next[key] = tally.indexOf(Math.max(...tally))
-    else delete next[key]
-  }
-  return next
-}
-
 const round2 = (v) => Math.round(v * 100) / 100
 
-export default function ReportsTab({ rows, loading, budgetId, scenario, catTree, catOptions, mergeChildren, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, onRenameNode, onMoveNode, onMergeNode, onUnmergeNode, onSplitNode, onAbsorbChildren, onPushUndo, onRemoveUndos }) {
+export default function ReportsTab({ rows, loading, budgetId, scenario, catTree, catOptions, mergeChildren, onUpdateCategory, onBulkUpdateCategory, onUpdateMemo, isMainScenario, opsEnabled, onRenameNode, onMoveNode, onMergeNode, onUnmergeNode, onAddParts, onAbsorbChildren, onPushUndo, onRemoveUndos }) {
   // all view state is node-id-keyed; the old name-keyed keys are abandoned
   const hiddenKey = `ynab_report_hiddennodes_${budgetId}_${scenario}`
   const lumpsKey  = `ynab_report_lumpnodes_${budgetId}_${scenario}`
@@ -107,11 +82,10 @@ export default function ReportsTab({ rows, loading, budgetId, scenario, catTree,
   const [selectedPayee,  setSelectedPayee]  = useState(null)
   const [editingNode,    setEditingNode]    = useState(null) // { id, value } | null
   const [contextMenu,    setContextMenu]    = useState(null) // { x, y, id, name } | null
-  // editingSplit: { sourceId, sourceName, parts, assignments, manualKeys, automatic } | null
+  // editingSplit: { sourceId, preKeys } | null — the SplitEditor manages its own
+  // bucket/assignment/selection state; this just names the source and any
+  // transactions preselected from the detail panel.
   const [editingSplit,   setEditingSplit]   = useState(null)
-  const [splitSelectedKeys, setSplitSelectedKeys] = useState(new Set())
-  // splitFocusedKey: key of card with keyboard focus, for shift+up/down range-select
-  const [splitFocusedKey,   setSplitFocusedKey]   = useState(null)
   const [groupPositions, setGroupPositions] = useState({}) // box node id → { x, y, width, height }
   const [tableSort,      setTableSort]      = useState({ key: 'value', dir: 'desc' })
   // zoomId: node whose children fill the treemap; null = top level
@@ -187,8 +161,6 @@ export default function ReportsTab({ rows, loading, budgetId, scenario, catTree,
     document.body.style.cursor = dragging ? 'grabbing' : ''
     return () => { document.body.style.cursor = '' }
   }, [dragging])
-
-  const splitStateRef = useRef({})
 
   // ancestor names, root → node (exclusive of the node itself)
   const ancestorNames = useCallback((id) => {
@@ -418,68 +390,17 @@ export default function ReportsTab({ rows, loading, budgetId, scenario, catTree,
     return base.filter(r => (r['Payee'] || '(none)') === selectedPayee)
   }, [selectedId, selectedPayee, rows, inSub])
 
+  // the source's direct transactions, newest first — fed to the SplitEditor
   const splitEditorRows = useMemo(() => {
     if (!editingSplit) return []
     return rows.filter(r => r._categoryId === editingSplit.sourceId)
       .sort((a, b) => (b['Date'] ?? '').localeCompare(a['Date'] ?? ''))
   }, [editingSplit?.sourceId, rows])
 
-  // per-part spending totals, recomputed as assignments change
-  const splitPartTotals = useMemo(() => {
-    if (!editingSplit) return []
-    return editingSplit.parts.map((_, i) =>
-      splitEditorRows.reduce((s, r) => {
-        const key = `${r._txId}/${r._subTxId}`
-        return s + ((editingSplit.assignments[key] ?? 0) === i ? netSpend(r) : 0)
-      }, 0)
-    )
-  }, [editingSplit, splitEditorRows])
-
-  // Shift+Up/Down extends card selection within the focused card's column.
-  // Placed after splitEditorRows so the ref update is valid.
-  splitStateRef.current = { editingSplit, splitFocusedKey, splitSelectedKeys, splitEditorRows }
-  useEffect(() => {
-    const handler = (e) => {
-      if (!e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return
-      const { editingSplit, splitFocusedKey, splitEditorRows } = splitStateRef.current
-      if (!editingSplit || !splitFocusedKey) return
-      e.preventDefault()
-      const focusedPart = editingSplit.assignments[splitFocusedKey] ?? 0
-      const partKeys = splitEditorRows
-        .filter(r => (editingSplit.assignments[`${r._txId}/${r._subTxId}`] ?? 0) === focusedPart)
-        .map(r => `${r._txId}/${r._subTxId}`)
-      const idx = partKeys.indexOf(splitFocusedKey)
-      if (idx === -1) return
-      const nextIdx = e.key === 'ArrowDown' ? Math.min(idx + 1, partKeys.length - 1) : Math.max(idx - 1, 0)
-      if (nextIdx === idx) return
-      setSplitSelectedKeys(prev => new Set([...prev, partKeys[nextIdx]]))
-      setSplitFocusedKey(partKeys[nextIdx])
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [])
-
-  const openSplitEditor = (sourceId, preassignedKeys) => {
-    const sourceName = tree.get(sourceId)?.name
-    if (!sourceName) return
-    let assignments  = {}
-    const manualKeys = new Set()
-    // both parts become child categories of the source; part 0 (the remainder
-    // that unassigned/future transactions follow) starts as "Other"
-    const parts      = ['Other', '']
-    if (preassignedKeys && preassignedKeys.size > 0) {
-      for (const k of preassignedKeys) {
-        assignments[k] = 1
-        manualKeys.add(k)
-      }
-      const editorRows = rows.filter(r => r._categoryId === sourceId)
-      const reclassified = classifyAll(editorRows, assignments, manualKeys, parts.length)
-      if (reclassified) assignments = reclassified
-    }
-    setEditingSplit({ sourceId, sourceName, parts, assignments, manualKeys, automatic: true })
+  const openSplitEditor = (sourceId, preKeys) => {
+    if (!tree.get(sourceId)) return
+    setEditingSplit({ sourceId, preKeys: preKeys ? new Set(preKeys) : null })
     onRemoveUndos(e => e.scope === 'splitEditor')
-    setSplitSelectedKeys(new Set())
-    setSplitFocusedKey(null)
     setSelectedId(null)
     setSelectedPayee(null)
   }
@@ -490,32 +411,8 @@ export default function ReportsTab({ rows, loading, budgetId, scenario, catTree,
     onRemoveUndos(e => e.scope === 'splitEditor')
   }
 
-  const assignToSplitPart = (txKeys, partIdx) => {
-    const prevAssignments = editingSplit.assignments
-    const prevManualKeys  = new Set(editingSplit.manualKeys)
-    onPushUndo({ scope: 'splitEditor', undo: () =>
-      setEditingSplit(prev => ({ ...prev, assignments: prevAssignments, manualKeys: prevManualKeys }))
-    })
-    setEditingSplit(prev => {
-      const manualKeys = new Set(prev.manualKeys)
-      txKeys.forEach(k => manualKeys.add(k))
-      let assignments = { ...prev.assignments }
-      txKeys.forEach(k => { assignments[k] = partIdx })
-      if (prev.automatic) {
-        const reclassified = classifyAll(splitEditorRows, assignments, manualKeys, prev.parts.length)
-        if (reclassified) assignments = reclassified
-      }
-      return { ...prev, assignments, manualKeys }
-    })
-    setSplitSelectedKeys(new Set())
-    setSplitFocusedKey(null)
-  }
-
-  const saveSplit = () => {
-    const { sourceId, parts, assignments } = editingSplit
-    const validParts = parts.map(p => p.trim()).filter(Boolean)
-    if (validParts.length < 2) return
-    onSplitNode(sourceId, validParts, assignments)
+  const saveSplit = (parts) => {
+    if (parts.length > 0) onAddParts(editingSplit.sourceId, parts)
     closeSplitEditor()
   }
 
@@ -877,6 +774,23 @@ export default function ReportsTab({ rows, loading, budgetId, scenario, catTree,
         </div>
       )}
 
+      {editingSplit && (() => {
+        const src = tree.get(editingSplit.sourceId)
+        return (
+          <SplitEditor
+            key={editingSplit.sourceId}
+            sourceName={src?.name}
+            parentName={src && src.parentId !== null ? tree.get(src.parentId)?.name : null}
+            rows={splitEditorRows}
+            initialSelectedKeys={editingSplit.preKeys}
+            opsEnabled={opsEnabled}
+            onSave={saveSplit}
+            onCancel={closeSplitEditor}
+            onPushUndo={onPushUndo}
+          />
+        )
+      })()}
+
       <div style={{ display: 'flex', gap: '24px', alignItems: 'flex-start', marginTop: '24px' }}>
         <table style={{ fontSize: '13px', borderCollapse: 'collapse', flexShrink: 0, width: '460px' }}>
           <thead>
@@ -953,166 +867,7 @@ export default function ReportsTab({ rows, loading, budgetId, scenario, catTree,
           </tbody>
         </table>
 
-        {editingSplit ? (
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', height: '520px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', flexShrink: 0, flexWrap: 'wrap' }}>
-              <span style={{ fontWeight: 600, fontSize: '14px', color: '#2c3e50' }}>
-                Split: <em style={{ fontWeight: 400 }}>{editingSplit.sourceName}</em>
-              </span>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: '#555', cursor: 'pointer', userSelect: 'none' }}>
-                <input
-                  type="checkbox"
-                  checked={editingSplit.automatic}
-                  onChange={() => setEditingSplit(prev => {
-                    const automatic = !prev.automatic
-                    if (automatic && prev.manualKeys.size > 0) {
-                      const reclassified = classifyAll(splitEditorRows, prev.assignments, prev.manualKeys, prev.parts.length)
-                      return { ...prev, automatic, assignments: reclassified ?? prev.assignments }
-                    }
-                    return { ...prev, automatic }
-                  })}
-                />
-                Automatic
-              </label>
-              <button
-                onClick={() => setEditingSplit(prev => ({ ...prev, parts: [...prev.parts, ''] }))}
-                style={SMALL_BTN_STYLE}
-              >+ Add part</button>
-              <button
-                onClick={saveSplit}
-                style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #27ae60', borderRadius: '3px', background: '#27ae60', color: '#fff' }}
-              >Save</button>
-              <button
-                onClick={closeSplitEditor}
-                style={{ ...SMALL_BTN_STYLE, marginLeft: 'auto' }}
-              >Cancel</button>
-            </div>
-            <div style={{ display: 'flex', gap: '10px', flex: 1, minHeight: 0 }}>
-              {editingSplit.parts.map((part, partIdx) => {
-                const partRows = splitEditorRows.filter(r =>
-                  (editingSplit.assignments[`${r._txId}/${r._subTxId}`] ?? 0) === partIdx
-                )
-                const partKeys = partRows.map(r => `${r._txId}/${r._subTxId}`)
-                return (
-                  <div
-                    key={partIdx}
-                    onDragOver={e => e.preventDefault()}
-                    onDrop={e => {
-                      e.preventDefault()
-                      const key = e.dataTransfer.getData('text/plain')
-                      if (!key) return
-                      const keys = splitSelectedKeys.has(key) ? [...splitSelectedKeys] : [key]
-                      assignToSplitPart(keys, partIdx)
-                    }}
-                    style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}
-                  >
-                    <div style={{ marginBottom: '6px', flexShrink: 0 }}>
-                      <input
-                        value={part}
-                        onChange={e => setEditingSplit(prev => {
-                          const parts = [...prev.parts]
-                          parts[partIdx] = e.target.value
-                          return { ...prev, parts }
-                        })}
-                        placeholder="Sub-category name"
-                        style={{ width: '100%', fontSize: '13px', fontWeight: 600, padding: '4px 6px', border: '1px solid #ccc', borderRadius: '3px', boxSizing: 'border-box' }}
-                      />
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px', paddingLeft: '2px' }}>
-                        <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 600 }}>
-                          {dollarFormatter(splitPartTotals[partIdx] ?? 0)}
-                          <span style={{ fontWeight: 400, color: '#999', marginLeft: '6px' }}>{partRows.length} transactions</span>
-                        </span>
-                        {splitSelectedKeys.size > 0 && (
-                          <button
-                            onClick={() => assignToSplitPart([...splitSelectedKeys], partIdx)}
-                            style={{ fontSize: '11px', padding: '1px 7px', cursor: 'pointer', border: '1px solid #2980b9', borderRadius: '3px', background: '#2980b9', color: '#fff' }}
-                          >
-                            Assign {splitSelectedKeys.size} here
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{
-                      flex: 1,
-                      overflow: 'auto',
-                      background: '#f0f2f5',
-                      borderRadius: '6px',
-                      padding: '6px',
-                      border: '2px dashed transparent',
-                    }}>
-                      {partRows.map((row, rowIdx) => {
-                        const key = `${row._txId}/${row._subTxId}`
-                        const isManual = editingSplit.manualKeys.has(key)
-                        const isSelected = splitSelectedKeys.has(key)
-                        const isFocused = splitFocusedKey === key
-                        return (
-                          <div
-                            key={key}
-                            draggable
-                            onDragStart={e => e.dataTransfer.setData('text/plain', key)}
-                            onClick={e => {
-                              if (e.shiftKey && splitFocusedKey) {
-                                // range-select from focused key to this key within the column
-                                const focusIdx = partKeys.indexOf(splitFocusedKey)
-                                const lo = Math.min(focusIdx, rowIdx)
-                                const hi = Math.max(focusIdx, rowIdx)
-                                setSplitSelectedKeys(prev => new Set([...prev, ...partKeys.slice(lo, hi + 1)]))
-                              } else {
-                                setSplitSelectedKeys(new Set([key]))
-                              }
-                              setSplitFocusedKey(key)
-                            }}
-                            style={{
-                              padding: '6px 8px',
-                              marginBottom: '4px',
-                              background: isSelected ? '#e3f2fd' : isManual ? '#e8f5e9' : '#fff',
-                              border: `1px solid ${isSelected ? '#90caf9' : isManual ? '#81c784' : '#ddd'}`,
-                              outline: isFocused ? '2px solid #2980b9' : 'none',
-                              outlineOffset: '-2px',
-                              borderRadius: '4px',
-                              cursor: 'grab',
-                              fontSize: '12px',
-                              userSelect: 'none',
-                            }}
-                          >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => {
-                                  setSplitSelectedKeys(prev => {
-                                    const next = new Set(prev)
-                                    next.has(key) ? next.delete(key) : next.add(key)
-                                    return next
-                                  })
-                                  setSplitFocusedKey(key)
-                                }}
-                                onClick={e => e.stopPropagation()}
-                                style={{ flexShrink: 0, cursor: 'pointer' }}
-                              />
-                              <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                                {row['Payee']}
-                              </div>
-                            </div>
-                            {row['Memo'] && (
-                              <div style={{ fontSize: '11px', color: '#999', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: '22px', marginTop: '1px' }}>
-                                {row['Memo']}
-                              </div>
-                            )}
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '2px', color: '#888', paddingLeft: '22px' }}>
-                              <span>{row['Date']}</span>
-                              <span style={{ fontWeight: 500, color: '#555' }}>{row['Outflow']}</span>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        ) : selectedId ? (
+        {!editingSplit && selectedId ? (
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '8px', color: '#2c3e50', display: 'flex', alignItems: 'baseline', gap: '12px' }}>
               {tree.get(selectedId)?.name}

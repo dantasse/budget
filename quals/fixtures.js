@@ -61,8 +61,10 @@ export async function launchApp(page, path = '/') {
 }
 
 // Creates a scenario (ops are enabled off-main) and returns after it's active.
+// Targets the scenario dropdown by its unique "＋ New scenario…" option — a bare
+// nth(1) races with the category dropdowns some tabs render.
 export async function createScenario(page, name) {
-  await page.locator('select').nth(1).selectOption('__new__')
+  await page.locator('select:has(option[value="__new__"])').selectOption('__new__')
   await page.getByPlaceholder('Scenario name').fill(name)
   await page.getByRole('button', { name: 'Create' }).click()
 }

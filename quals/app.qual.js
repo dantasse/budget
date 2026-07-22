@@ -3,6 +3,19 @@ import { launchApp, createScenario, BUDGETS, TRANSACTIONS, CATEGORIES } from './
 
 const label = (page, name) => page.locator(`[data-label-for="${name}"]`)
 
+// Opens the Reports split editor on a treemap cell, makes one subcategory, moves
+// the matching transaction cards into it (click selects, then Assign), and saves.
+async function splitInto(page, sourceRegex, partName, cardTexts, { sibling = false } = {}) {
+  await page.locator('svg text', { hasText: sourceRegex }).click({ button: 'right', force: true })
+  await page.getByText('Split...').click()
+  await page.getByRole('button', { name: '+ New subcategory' }).click()
+  await page.getByPlaceholder('New category name').fill(partName)
+  if (sibling) await page.getByLabel(/sibling/).check()
+  for (const t of cardTexts) await page.locator('[data-txkey]', { hasText: t }).click()
+  await page.getByRole('button', { name: /Assign \d+ here/ }).nth(1).click()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+}
+
 test('transactions tab renders fixture rows', async ({ page }) => {
   await launchApp(page)
   await expect(page.getByText('Landlord LLC').first()).toBeVisible()
@@ -112,39 +125,70 @@ test('drag-merge combines two categories and ungroup reverses it', async ({ page
 test('split editor saves a split; parts nest under the source', async ({ page }) => {
   await launchApp(page, '/main/Reports')
   await createScenario(page, 'qual-scenario')
-  // treemap texts are pointer-events:none; force dispatches to the cell rect beneath
-  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
-  await page.getByText('Split...').click()
-  const partInputs = page.getByPlaceholder('Sub-category name')
-  await partInputs.nth(1).fill('Coffee')
-  // assign the Coffee Cart transaction to part 2
-  await page.locator('div', { hasText: /^Coffee Cart/ }).locator('input[type="checkbox"]').last().check()
-  await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
-  await page.getByRole('button', { name: 'Save' }).click()
-  // parts are children of Groceries: not at the top level, visible after zooming in
+  await splitInto(page, /^Groc/, 'Coffee', [/Coffee Cart/])
+  // the part is a child of Groceries: not at the top level, visible after zooming in
   await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toHaveCount(0)
   await label(page, 'Essentials').getByRole('button', { name: 'zoom' }).click()
   await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toBeVisible()
-  // the scenario-local category shows up in the transactions dropdown
+  // the scenario-local category shows up in the transactions dropdown as a full path
   await page.getByRole('button', { name: 'Transactions' }).click()
   await expect(page.locator('tbody select').first().locator('option', { hasText: /Coffee$/ })).toHaveCount(1)
-  // the category column shows the full path down to the new part
   await expect(page.locator('tr', { hasText: 'Coffee Cart' }).locator('option').first())
     .toHaveText('Essentials → Groceries → Coffee')
 })
 
-test('splitter automatic mode assigns all rows with the same payee', async ({ page }) => {
+test('split editor can place a subcategory as a sibling', async ({ page }) => {
+  await launchApp(page, '/main/Reports')
+  await createScenario(page, 'qual-scenario')
+  await splitInto(page, /^Groc/, 'Coffee', [/Coffee Cart/], { sibling: true })
+  await page.getByRole('button', { name: 'Transactions' }).click()
+  // sibling → parented under Groceries' parent (Essentials), not under Groceries
+  await expect(page.locator('tr', { hasText: 'Coffee Cart' }).locator('option').first())
+    .toHaveText('Essentials → Coffee')
+})
+
+test('rubber-band drag selects several transactions to assign at once', async ({ page }) => {
   await launchApp(page, '/main/Reports')
   await createScenario(page, 'qual-scenario')
   await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
   await page.getByText('Split...').click()
-  // assign one of the two Corner Grocer transactions ($25); the other ($40) follows by payee
-  // anchored to the full row text: an unanchored /^Corner Grocer/ also matches the column container
-  await page.locator('div', { hasText: /^Corner Grocer\s*[\d-]+\s*25\.00$/ }).locator('input[type="checkbox"]').check()
-  await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
-  // part totals: both Corner Grocer txs ($65) moved; Farm Stand + Coffee Cart ($23) stayed in part 0
-  await expect(page.getByText(/^\$65\s*2 transactions$/)).toBeVisible()
-  await expect(page.getByText(/^\$23\s*2 transactions$/)).toBeVisible()
+  await page.getByRole('button', { name: '+ New subcategory' }).click()
+  await page.getByPlaceholder('New category name').fill('Big')
+  // cards are newest-first: the two Corner Grocer transactions are rows 0 and 1
+  const c1 = await page.locator('[data-txkey]').nth(0).boundingBox()
+  const c2 = await page.locator('[data-txkey]').nth(1).boundingBox()
+  // start on empty background to the right of both columns, drag a box left
+  // across the first two cards (columns span ~500px; viewport is 1500 wide)
+  await page.mouse.move(c1.x + 700, c1.y + 4)
+  await page.mouse.down()
+  await page.mouse.move(c1.x + 10, c2.y + c2.height - 4, { steps: 10 })
+  await page.mouse.up()
+  // both selected → the bucket offers to assign 2
+  await page.getByRole('button', { name: 'Assign 2 here' }).nth(1).click()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await page.getByRole('button', { name: 'Transactions' }).click()
+  await expect(page.locator('tr', { hasText: 'Corner Grocer' }).first().locator('option').first())
+    .toHaveText('Essentials → Groceries → Big')
+})
+
+test('dragging a transaction card into a subcategory assigns it', async ({ page }) => {
+  await launchApp(page, '/main/Reports')
+  await createScenario(page, 'qual-scenario')
+  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
+  await page.getByText('Split...').click()
+  await page.getByRole('button', { name: '+ New subcategory' }).click()
+  await page.getByPlaceholder('New category name').fill('Coffee')
+  const card = await page.locator('[data-txkey]', { hasText: /Coffee Cart/ }).boundingBox()
+  const drop = await page.getByPlaceholder('New category name').boundingBox() // in the bucket column
+  await page.mouse.move(card.x + card.width / 2, card.y + card.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(card.x + card.width / 2 + 6, card.y + card.height / 2) // pass the 4px drag threshold
+  await page.mouse.move(drop.x + drop.width / 2, drop.y + drop.height / 2, { steps: 10 }) // over the bucket
+  await page.mouse.up()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await page.getByRole('button', { name: 'Transactions' }).click()
+  await expect(page.locator('tr', { hasText: 'Coffee Cart' }).locator('option').first())
+    .toHaveText('Essentials → Groceries → Coffee')
 })
 
 test('dragging a cell onto another box moves it there', async ({ page }) => {
@@ -165,12 +209,7 @@ test('dragging a cell onto another box moves it there', async ({ page }) => {
 test('absorb children reverses a split', async ({ page }) => {
   await launchApp(page, '/main/Reports')
   await createScenario(page, 'qual-scenario')
-  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
-  await page.getByText('Split...').click()
-  await page.getByPlaceholder('Sub-category name').nth(1).fill('Coffee')
-  await page.locator('div', { hasText: /^Coffee Cart/ }).locator('input[type="checkbox"]').last().check()
-  await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
-  await page.getByRole('button', { name: 'Save' }).click()
+  await splitInto(page, /^Groc/, 'Coffee', [/Coffee Cart/])
   await expect(page.locator('td', { hasText: /^Coffee$/ })).toBeVisible()
   await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
   await page.getByText('Absorb children').click()
@@ -180,13 +219,7 @@ test('absorb children reverses a split', async ({ page }) => {
 test('lump and zoom work at any layer', async ({ page }) => {
   await launchApp(page, '/main/Reports')
   await createScenario(page, 'qual-scenario')
-  await page.locator('svg text', { hasText: /^Groc/ }).click({ button: 'right', force: true })
-  await page.getByText('Split...').click()
-  await page.getByPlaceholder('Sub-category name').nth(1).fill('Coffee')
-  // an empty part renders no cell, so give Coffee a transaction
-  await page.locator('div', { hasText: /^Coffee Cart/ }).locator('input[type="checkbox"]').last().check()
-  await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
-  await page.getByRole('button', { name: 'Save' }).click()
+  await splitInto(page, /^Groc/, 'Coffee', [/Coffee Cart/])
   await label(page, 'Essentials').getByRole('button', { name: 'zoom' }).click()
   await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toBeVisible()
   // Groceries has children now, so it lumps at level 2
@@ -229,21 +262,19 @@ test('zoom shows categories, payee split narrows the detail panel', async ({ pag
   await expect(page.getByText('· Corner Grocer')).toBeVisible()
 })
 
-test('leaf split button opens the editor and creates child categories', async ({ page }) => {
+test('leaf split button opens the editor and creates a child category', async ({ page }) => {
   await launchApp(page, '/main/Reports')
   await createScenario(page, 'qual-scenario')
   await label(page, 'Essentials').getByRole('button', { name: 'zoom' }).click()
   await label(page, 'Groceries').getByRole('button', { name: 'split' }).click()
   await expect(page.getByText('Split:')).toBeVisible()
-  // part 0 defaults to "Other" so both parts are real children, not a same-named copy
-  await expect(page.getByPlaceholder('Sub-category name').nth(0)).toHaveValue('Other')
-  await page.getByPlaceholder('Sub-category name').nth(1).fill('Coffee')
-  await page.locator('div', { hasText: /^Coffee Cart/ }).locator('input[type="checkbox"]').last().check()
+  await page.getByRole('button', { name: '+ New subcategory' }).click()
+  await page.getByPlaceholder('New category name').fill('Coffee')
+  await page.locator('[data-txkey]', { hasText: /Coffee Cart/ }).click()
   await page.getByRole('button', { name: /Assign 1 here/ }).nth(1).click()
-  await page.getByRole('button', { name: 'Save' }).click()
-  // the Groceries box now shows its level-3 subcategories, not payees
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  // the Groceries box now shows a Coffee subcategory cell
   await expect(page.locator('svg text', { hasText: /^Coffee$/ })).toBeVisible()
-  await expect(page.locator('svg text', { hasText: /^Other$/ })).toBeVisible()
 })
 
 test('categories tab drag re-parents a node', async ({ page }) => {
@@ -332,58 +363,6 @@ test('deleting a group removes its whole subtree and persists', async ({ page })
   await page.reload()
   await expect(page.locator('[data-node-id="g1"]')).toBeVisible()
   await expect(page.locator('[data-node-id="g2"]')).toHaveCount(0)
-})
-
-test('Reports2 payee buckets moves a payee into a new child category', async ({ page }) => {
-  await launchApp(page, '/main/Reports2')
-  await createScenario(page, 'qual-scenario')
-  await page.getByTitle('source category').selectOption('c-groceries')
-  await page.getByRole('button', { name: /^Corner Grocer/ }).click()
-  await page.getByRole('button', { name: '+ New subcategory' }).click()
-  await page.getByPlaceholder('New category name').fill('Stores')
-  await page.getByRole('button', { name: 'Move 1 here' }).click()
-  await page.getByRole('button', { name: 'Save', exact: true }).click()
-  await page.getByRole('button', { name: 'Transactions' }).click()
-  await expect(page.locator('tr', { hasText: 'Corner Grocer' }).first().locator('option').first())
-    .toHaveText('Essentials → Groceries → Stores')
-})
-
-test('Reports3 search & carve creates a sibling category from matches', async ({ page }) => {
-  await launchApp(page, '/main/Reports3')
-  await createScenario(page, 'qual-scenario')
-  await page.getByTitle('source category').selectOption('c-groceries')
-  await page.getByPlaceholder('Search payee or memo…').fill('coffee')
-  await expect(page.getByText('1 transactions match, $8')).toBeVisible()
-  await page.getByPlaceholder('New category name').fill('Coffee')
-  await page.getByLabel(/sibling/).check()
-  await page.getByRole('button', { name: 'Carve out' }).click()
-  await page.getByRole('button', { name: 'Save', exact: true }).click()
-  await page.getByRole('button', { name: 'Transactions' }).click()
-  await expect(page.locator('tr', { hasText: 'Coffee Cart' }).locator('option').first())
-    .toHaveText('Essentials → Coffee')
-})
-
-test('Reports4 triage deck deals payees largest-first into buckets', async ({ page }) => {
-  await launchApp(page, '/main/Reports4')
-  await createScenario(page, 'qual-scenario')
-  await page.getByTitle('source category').selectOption('c-groceries')
-  // largest payee first: Corner Grocer ($65) → new bucket
-  await expect(page.getByText('Corner Grocer')).toBeVisible()
-  await page.getByRole('button', { name: '+ New bucket' }).click()
-  await page.getByPlaceholder('New category name').fill('Stores')
-  await page.getByRole('button', { name: 'Create & assign' }).click()
-  // Farm Stand ($15) → same bucket; Coffee Cart ($8) → keep in Groceries
-  await expect(page.getByText('Farm Stand')).toBeVisible()
-  await page.getByRole('button', { name: /^Stores/ }).click()
-  await expect(page.getByText('Coffee Cart')).toBeVisible()
-  await page.getByRole('button', { name: /^Keep in Groceries/ }).click()
-  await expect(page.getByText('All payees triaged — hit Save.')).toBeVisible()
-  await page.getByRole('button', { name: 'Save', exact: true }).click()
-  await page.getByRole('button', { name: 'Transactions' }).click()
-  await expect(page.locator('tr', { hasText: 'Farm Stand' }).locator('option').first())
-    .toHaveText('Essentials → Groceries → Stores')
-  await expect(page.locator('tr', { hasText: 'Coffee Cart' }).locator('option').first())
-    .toHaveText('Essentials → Groceries')
 })
 
 test('categories tab arrows collapse and expand a subtree', async ({ page }) => {

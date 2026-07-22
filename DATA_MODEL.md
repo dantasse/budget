@@ -1,7 +1,8 @@
 # Data model
 
-Last verified against the code: 2026-07-19 (delete op, single Category path
-column). If you change any layer below, update this file.
+Last verified against the code: 2026-07-21 (Reports split editor via
+addCategoryParts; splitNode removed). If you change any layer below, update
+this file.
 
 ## Layer 0: YNAB (source of truth)
 
@@ -91,11 +92,6 @@ changelog), persisted at `localStorage.ynab_cattree_{budgetId}_{scenario}`:
   - `unmergeNode(fromId)` — removes the route + tombstone; the YNAB node
     reappears at its (possibly overridden) parent. Children that were
     reparented by the merge stay where they are.
-  - `splitNode(sourceId, partNames, assignments)` — creates one local child
-    node per part *under* `sourceId` (the split source stays in the tree as
-    the parent). Unassigned and future transactions follow a route to part 0;
-    `assignments` writes `txCats` for the rest. The old `splitFrom` marker is
-    gone: the parent link *is* the split relationship.
   - `absorbChildren(id)` — the inverse of split, generalized: every descendant
     of `id` merges into `id` (local descendants deleted, YNAB descendants
     tombstoned + routed). This is "remove split", and also works as a
@@ -109,11 +105,12 @@ changelog), persisted at `localStorage.ynab_cattree_{budgetId}_{scenario}`:
   - `recategorizeTx(keys, nodeId)` — per-transaction `txCats` entries; a
     transaction can be put on any node (this beats `routes`, so a split
     parent can still hold direct transactions).
-  - `addCategoryParts(sourceId, parts)` — used by the Reports2/3/4 split
-    prototypes. Each part `{ name, placement, txKeys }` becomes a new local
-    node (`placement` 'child' = under the source, 'sibling' = under the
-    source's parent) with `txCats` entries for its `txKeys`. No `routes` are
-    written: unassigned and future transactions stay on the source.
+  - `addCategoryParts(sourceId, parts)` — **the split op** (the Reports split
+    editor; replaced the old `splitNode`). Each part
+    `{ name, placement, txKeys }` becomes a new local node (`placement` 'child'
+    = under the source, 'sibling' = under the source's parent) with `txCats`
+    entries for its `txKeys`. No `routes` are written: unassigned and future
+    transactions stay on the source (no forced "Other" remainder part).
 - **Memo edits** are the only remaining per-row patches:
   `localStorage.ynab_memoedits_{budgetId}_{scenario}`, applied before resolution.
 - Edit routing: non-main → catModel/memoEdits. Main + "Edit live data": a
@@ -126,8 +123,8 @@ changelog), persisted at `localStorage.ynab_cattree_{budgetId}_{scenario}`:
   depth-first as `{ id, name, depth, path }`, hidden YNAB nodes excluded.
   Every node at every depth is pickable.
 - `mergeChildren`: Map of live node id → `[{ id, name }]` of tombstoned YNAB
-  categories routed into it (split routes don't appear here — a split's route
-  targets a *child* of the source, and the source isn't tombstoned).
+  categories routed into it (only `merged` tombstones appear; splits write
+  `txCats`, not routes or tombstones, so they never show up here).
 - **Future: merging back into YNAB.** Not built yet. The intended rule: every
   transaction rolls up to the depth-2 ancestor of its resolved node (nodes at
   depth ≥ 3 roll up their transactions; transactions sitting on a depth-1
@@ -175,31 +172,27 @@ The table below lists every node that holds transactions directly (its
 a hide toggle, and merge-child subrows (from `mergeChildren`, totals via
 `_ynabCategoryId`).
 
-The split editor's in-progress state (`editingSplit`, with automatic
-assignment: a non-manual row follows the majority part among the manual
-examples sharing its payee; payees with no manual example stay on part 0) is
-in-memory only; Save converts it into a `splitNode` op.
-It operates on the rows sitting *directly* on the source node. It opens from a
-leaf box's "split" button, a cell's context menu, or the detail panel; part 0
-(the remainder that unassigned/future transactions follow) starts named
-"Other", so both parts read as children of the source rather than a copy of it.
+### The split editor (`SplitEditor.jsx`)
 
-## Prototype tabs: Reports2 / Reports3 / Reports4
+Opened full-width above the table (which drops below it) from a treemap cell —
+a leaf box's "split" button, a cell's right-click "Split..." menu, or the
+detail panel's "split" button. `editingSplit` in ReportsTab is just
+`{ sourceId, preKeys }`; the editor owns its bucket/assignment/selection state
+and calls `onAddParts` (→ `addCategoryParts`) on save.
 
-Three throwaway explorations of the "split a category into subcategories"
-interaction (`Reports2.jsx`/`Reports3.jsx`/`Reports4.jsx`, shared bits in
-`protoCommon.jsx`). Each picks a source category, works on the rows sitting
-directly on it (current date range only), offers a per-part child/sibling
-choice, and saves through `addCategoryParts`:
+It lays the source's *directly-held* transactions out as cards in a "staying"
+column plus one column per new subcategory. Move transactions by dragging a
+card onto a column, or rubber-band selecting several (click-drag on the empty
+background) and using a column's "Assign N here" button / dragging the
+selection. Each subcategory column carries a child/sibling radio. Cards left in
+"staying" remain on the source. Per-action snapshots push `scope: 'splitEditor'`
+undo entries (pruned when the editor closes). All mouse interaction is
+`onMouseDown`/document-`mouseup` based (like the treemap and Categories tab),
+not HTML5 drag.
 
-- **Reports2 "payee buckets"**: payees as chips with counts/totals; select
-  chips and move them into named buckets.
-- **Reports3 "search & carve"**: live payee/memo search over the remainder;
-  each query's matches carve out into a named category.
-- **Reports4 "triage deck"**: payees dealt one at a time (largest first) with
-  sample transactions; assign by click or number key, `k` keeps, `u` undoes.
-
-One (or none) of these will replace the split editor; delete the rest.
+The split editor grew out of three throwaway prototype tabs (Reports2 "payee
+buckets", Reports3 "search & carve", Reports4 "triage deck"); all three, and
+their shared `protoCommon.jsx`, were deleted once this landed.
 
 ## The Categories tab
 
